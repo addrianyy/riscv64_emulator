@@ -35,6 +35,7 @@ struct JitTrampolineBlock {
   uint64_t block_base;
   uint64_t max_executable_pc;
   uint64_t code_base;
+  uint64_t outline_handlers;
   uint64_t entrypoint;
 
   uint64_t exit_reason;
@@ -74,6 +75,153 @@ static uint64_t memory_access_size_log2(InstructionType type) {
   }
 }
 
+struct TemplateGenerator {
+  constexpr static A64R register_state_reg = A64R::X0;
+  constexpr static A64R memory_base_reg = A64R::X1;
+  constexpr static A64R memory_size_reg = A64R::X2;
+  constexpr static A64R block_base_reg = A64R::X3;
+  constexpr static A64R max_executable_pc_reg = A64R::X4;
+  constexpr static A64R code_base_reg = A64R::X5;
+  constexpr static A64R base_pc_reg = A64R::X6;
+
+  constexpr static A64R exit_reason_reg = A64R::X0;
+  constexpr static A64R exit_pc_reg = A64R::X1;
+
+  // ABI = X8, X9
+
+  constexpr static A64R outline_handler_pc_reg = A64R::X8;
+  constexpr static A64R outline_handler_arg_reg = A64R::X9;
+
+  constexpr static A64R return_address_reg = A64R::X15;
+
+  template <typename Exit>
+  static void generate_memory_translate(a64::Assembler& as,
+                                        A64R address_reg,
+                                        uint64_t access_size_log2,
+                                        bool write,
+                                        const Exit& generate_exit) {
+    const auto fault_label = as.allocate_label();
+    const auto continue_label = as.allocate_label();
+
+    // Make sure that address is aligned otherwise the bound check later won't be accurate.
+    if (access_size_log2 > 0) {
+      as.tst(address_reg, (1 << access_size_log2) - 1);
+      as.b(a64::Condition::NotZero, fault_label);
+    }
+
+    // Check if address < memory_size. We don't need to account for the access size because we
+    // have already checked for alignment.
+    as.cmp(address_reg, memory_size_reg);
+    as.b(a64::Condition::UnsignedLess, continue_label);
+
+    // Out of bounds access: exit the VM.
+    as.insert_label(fault_label);
+    generate_exit(write ? JitExitReason::MemoryWriteFault : JitExitReason::MemoryReadFault);
+
+    // Continue the memory access.
+    as.insert_label(continue_label);
+
+    as.add(address_reg, memory_base_reg, address_reg);
+  }
+
+  template <typename Exit>
+  static void generate_validated_branch_noexit(a64::Assembler& as,
+                                               A64R block_offset_reg,
+                                               bool single_step,
+                                               const Exit& generate_exit) {
+    // Load the 32 bit code offset from block translation table.
+    as.add(block_offset_reg, block_base_reg, block_offset_reg);
+    as.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
+
+    const auto code_offset_reg = block_offset_reg;
+
+    // Exit the VM if the block isn't generated yet.
+    const auto no_block_label = as.allocate_label();
+    as.cbz(code_offset_reg, no_block_label);
+
+    // Jump to the block.
+    as.add(code_offset_reg, code_base_reg, code_offset_reg);
+    as.br(code_offset_reg);
+
+    as.insert_label(no_block_label);
+    generate_exit(JitExitReason::BlockNotGenerated);
+  }
+
+  template <typename Exit>
+  static void generate_dynamic_branch(a64::Assembler& as,
+                                      A64R target_pc,
+                                      A64R scratch_reg,
+                                      bool single_step,
+                                      const Exit& generate_exit) {
+    const auto fault_label = as.allocate_label();
+
+    // Mask off last bit as is required by the architecture.
+    as.and_(target_pc, target_pc, ~uint64_t(1));
+
+    // Exit the VM if the address is not properly aligned.
+    as.tst(target_pc, 0b11);
+    as.b(a64::Condition::NotZero, fault_label);
+
+    // Exit the VM if target_pc >= max_executable_pc.
+    as.cmp(target_pc, max_executable_pc_reg);
+    as.b(a64::Condition::UnsignedGreaterEqual, fault_label);
+
+    generate_validated_branch_noexit(as, scratch_reg, single_step, generate_exit);
+    generate_exit(JitExitReason::BlockNotGenerated);
+
+    as.insert_label(fault_label);
+    generate_exit(JitExitReason::DynamicBranchFailed);
+  }
+};
+
+static void generate_outline_handlers(JitCodeBuffer& code_buffer, OutlineHandlers& handlers) {
+  a64::Assembler as;
+
+  for (size_t i = 0; i < 4; ++i) {
+    handlers.addresses[size_t(OutlineHandlerID::MemoryTranslate8) + i] = as.byte_offset();
+
+    TemplateGenerator::generate_memory_translate(
+      as, TemplateGenerator::outline_handler_arg_reg, i, false, [&](JitExitReason reason) {
+        as.macro_mov(TemplateGenerator::exit_reason_reg, int64_t(reason));
+        as.mov(TemplateGenerator::exit_pc_reg, TemplateGenerator::outline_handler_pc_reg);
+        as.ret(TemplateGenerator::return_address_reg);
+      });
+    as.ret();
+  }
+
+  {
+    handlers.addresses[size_t(OutlineHandlerID::StaticBranch)] = as.byte_offset();
+
+    as.mov(TemplateGenerator::outline_handler_arg_reg, TemplateGenerator::outline_handler_pc_reg);
+    TemplateGenerator::generate_validated_branch_noexit(
+      as, TemplateGenerator::outline_handler_arg_reg, false, [&](JitExitReason reason) {
+        as.macro_mov(TemplateGenerator::exit_reason_reg, int64_t(reason));
+        as.mov(TemplateGenerator::exit_pc_reg, TemplateGenerator::outline_handler_pc_reg);
+        as.ret(TemplateGenerator::return_address_reg);
+      });
+  }
+
+  {
+    handlers.addresses[size_t(OutlineHandlerID::DynamicBranch)] = as.byte_offset();
+
+    as.mov(TemplateGenerator::outline_handler_arg_reg, TemplateGenerator::outline_handler_pc_reg);
+    TemplateGenerator::generate_dynamic_branch(
+      as, TemplateGenerator::outline_handler_pc_reg, TemplateGenerator::outline_handler_arg_reg,
+      false, [&](JitExitReason reason) {
+        as.macro_mov(TemplateGenerator::exit_reason_reg, int64_t(reason));
+        as.mov(TemplateGenerator::exit_pc_reg, TemplateGenerator::outline_handler_pc_reg);
+        as.ret(TemplateGenerator::return_address_reg);
+      });
+  }
+
+  const auto base_code_address =
+    code_buffer.insert_standalone(cast_instructions_to_bytes(as.assembled_instructions()));
+
+  for (size_t i = 0; i < size_t(OutlineHandlerID::Max); ++i) {
+    handlers.addresses[i] = uint64_t(base_code_address) + handlers.addresses[i];
+  }
+}
+
 struct CodeGenerator {
   a64::Assembler& assembler;
   const Memory& memory;
@@ -91,6 +239,8 @@ struct CodeGenerator {
   constexpr static A64R max_executable_pc_reg = A64R::X4;
   constexpr static A64R code_base_reg = A64R::X5;
   constexpr static A64R base_pc_reg = A64R::X6;
+  constexpr static A64R outline_handlers_reg = A64R::X7;
+  constexpr static A64R return_address_reg = A64R::X15;
 
   constexpr static A64R exit_reason_reg = A64R::X0;
   constexpr static A64R exit_pc_reg = A64R::X1;
@@ -170,12 +320,12 @@ struct CodeGenerator {
   void generate_exit(JitExitReason reason, uint64_t pc) {
     load_immediate_u(exit_reason_reg, uint64_t(reason));
     load_immediate_u(exit_pc_reg, pc);
-    assembler.ret();
+    assembler.ret(return_address_reg);
   }
   void generate_exit(JitExitReason reason, A64R pc) {
     load_immediate_u(exit_reason_reg, uint64_t(reason));
     assembler.mov(exit_pc_reg, pc);
-    assembler.ret();
+    assembler.ret(return_address_reg);
   }
 
   void generate_memory_translate(A64R address_reg, uint64_t access_size_log2, bool write) {
@@ -360,12 +510,21 @@ struct CodeGenerator {
       case IT::Lbu:
       case IT::Lhu:
       case IT::Lwu: {
-        const auto address_reg = A64R::X10;
-        const auto scratch_reg = A64R::X11;
-        const auto value_reg = A64R::X11;
+        const auto address_reg = TemplateGenerator::outline_handler_arg_reg;
+        const auto scratch_reg = A64R::X10;
+        const auto value_reg = A64R::X10;
 
         load_register_with_offset(address_reg, scratch_reg, instruction.rs1(), instruction.imm());
-        generate_memory_translate(address_reg, memory_access_size_log2(instruction_type), false);
+
+        load_immediate_u(TemplateGenerator::outline_handler_pc_reg, current_pc);
+        assembler.ldr(A64R::X11, outline_handlers_reg,
+                      (uintptr_t(OutlineHandlerID::MemoryTranslate8) +
+                       memory_access_size_log2(instruction_type)) *
+                        8);
+        assembler.blr(A64R::X11);
+
+        // generate_memory_translate(address_reg, memory_access_size_log2(instruction_type),
+        // false);
 
         switch (instruction_type) {
             // clang-format off
@@ -391,12 +550,19 @@ struct CodeGenerator {
       case IT::Sh:
       case IT::Sw:
       case IT::Sd: {
-        const auto address_reg = A64R::X10;
-        const auto scratch_reg = A64R::X11;
-        const auto value_reg = A64R::X11;
+        const auto address_reg = TemplateGenerator::outline_handler_arg_reg;
+        const auto scratch_reg = A64R::X10;
+        const auto value_reg = A64R::X10;
 
         load_register_with_offset(address_reg, scratch_reg, instruction.rs1(), instruction.imm());
-        generate_memory_translate(address_reg, memory_access_size_log2(instruction_type), true);
+        // generate_memory_translate(address_reg, memory_access_size_log2(instruction_type), true);
+
+        load_immediate_u(TemplateGenerator::outline_handler_pc_reg, current_pc);
+        assembler.ldr(A64R::X11, outline_handlers_reg,
+                      (uintptr_t(OutlineHandlerID::MemoryTranslate8) +
+                       memory_access_size_log2(instruction_type)) *
+                        8);
+        assembler.blr(A64R::X11);
 
         load_register(value_reg, instruction.rs2());
 
@@ -688,6 +854,7 @@ struct CodeGenerator {
   void generate_block() {
     // We cannot use load_immediate here.
     assembler.macro_mov(base_pc_reg, int64_t(base_pc));
+    assembler.mov(return_address_reg, A64R::X30);
 
     while (true) {
       uint32_t instruction_encoded;
@@ -759,6 +926,8 @@ void JitExecutor::generate_trampoline() {
   as.ldr(CodeGenerator::max_executable_pc_reg, A64R::X10,
          offsetof(JitTrampolineBlock, max_executable_pc));
   as.ldr(CodeGenerator::code_base_reg, A64R::X10, offsetof(JitTrampolineBlock, code_base));
+  as.ldr(CodeGenerator::outline_handlers_reg, A64R::X10,
+         offsetof(JitTrampolineBlock, outline_handlers));
 
   as.ldr(A64R::X10, A64R::X10, offsetof(JitTrampolineBlock, entrypoint));
   as.blr(A64R::X10);
@@ -781,6 +950,8 @@ JitExecutor::JitExecutor(std::shared_ptr<JitCodeBuffer> code_buffer)
   if (true) {
     code_dump = std::make_unique<JitCodeDump>("jit_dump.bin");
   }
+
+  generate_outline_handlers(*this->code_buffer, outline_handlers);
 }
 
 JitExecutor::~JitExecutor() = default;
@@ -806,6 +977,7 @@ void JitExecutor::run(Memory& memory, Cpu& cpu) {
       .block_base = uint64_t(code_buffer->block_translation_table()),
       .max_executable_pc = code_buffer->max_block_count() * 4,
       .code_base = uint64_t(code_buffer->code_buffer_base()),
+      .outline_handlers = uint64_t(&outline_handlers),
       .entrypoint = uint64_t(code),
     };
 
