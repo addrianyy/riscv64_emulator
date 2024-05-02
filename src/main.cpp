@@ -2,6 +2,7 @@
 
 #include <base/Error.hpp>
 #include <base/Log.hpp>
+#include <base/time/Stopwatch.hpp>
 
 #include <vm/Cpu.hpp>
 #include <vm/Vm.hpp>
@@ -23,11 +24,10 @@ int main() {
   cpu.set_reg(vm::Register::Sp, image.base - 8);
   cpu.set_reg(vm::Register::Pc, image.entrypoint);
 
-  while (true) {
-    auto exit = vm.run(cpu);
+  base::Stopwatch stopwatch;
 
-    log_debug("{:x}: {}", cpu.pc(), cpu.reg(exit.target_register));
+  auto exit = vm.run(cpu);
 
-    break;
-  }
+  log_info("{:x}: {}", cpu.pc(), cpu.reg(exit.target_register));
+  log_info("took {}", stopwatch.elapsed());
 }

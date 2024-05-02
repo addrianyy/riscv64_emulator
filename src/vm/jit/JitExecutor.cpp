@@ -772,8 +772,8 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
     code_dump->write(pc, instruction_bytes);
   }
 
-  if (false) {
-    log_info("jitted {:x}: {} instructions...", pc, instructions.size());
+  if (true) {
+    log_debug("generated code for {:x}: {} instructions...", pc, instructions.size());
   }
 
   return code_buffer->insert(pc, instruction_bytes);
