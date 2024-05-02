@@ -17,8 +17,8 @@ uint32_t JitCodeBuffer::allocate_executable_memory(std::span<const uint8_t> code
   return start_offset;
 }
 
-JitCodeBuffer::JitCodeBuffer(size_t size, size_t max_executable_guest_address)
-    : executable_buffer(size), next_free_offset(16) {
+JitCodeBuffer::JitCodeBuffer(Type type, size_t size, size_t max_executable_guest_address)
+    : type_(type), executable_buffer(size), next_free_offset(16) {
   max_blocks = (max_executable_guest_address + block_size - 1) / block_size;
   block_to_offset = std::make_unique<std::atomic_uint32_t[]>(max_blocks);
 }

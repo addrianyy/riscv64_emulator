@@ -79,6 +79,7 @@ struct CodeGenerator {
 
   size_t max_code_blocks{};
   bool single_step{};
+  bool multithreaded_code_buffer{};
 
   uint64_t base_pc{};
   uint64_t current_pc{};
@@ -237,8 +238,12 @@ struct CodeGenerator {
 
   a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
-    assembler.add(block_offset_reg, block_base_reg, block_offset_reg);
-    assembler.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
+    if (multithreaded_code_buffer) {
+      assembler.add(block_offset_reg, block_base_reg, block_offset_reg);
+      assembler.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
+    } else {
+      assembler.ldr(cast_to_32bit(block_offset_reg), block_base_reg, block_offset_reg);
+    }
 
     const auto code_offset_reg = block_offset_reg;
 
@@ -758,6 +763,8 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
 #else
     .single_step = false,
 #endif
+
+    .multithreaded_code_buffer = code_buffer->type() == JitCodeBuffer::Type::Multithreaded,
 
     .base_pc = pc,
     .current_pc = pc,

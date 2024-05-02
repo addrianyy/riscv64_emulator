@@ -9,7 +9,16 @@
 namespace vm {
 
 class JitCodeBuffer {
+ public:
+  enum class Type {
+    Singlethreaded,
+    Multithreaded,
+  };
+
+ private:
   constexpr static size_t block_size = 4;
+
+  Type type_;
 
   std::unique_ptr<std::atomic_uint32_t[]> block_to_offset;
   size_t max_blocks{};
@@ -22,12 +31,13 @@ class JitCodeBuffer {
   uint32_t allocate_executable_memory(std::span<const uint8_t> code);
 
  public:
-  JitCodeBuffer(size_t size, size_t max_executable_guest_address);
+  JitCodeBuffer(Type type, size_t size, size_t max_executable_guest_address);
 
   void* get(uint64_t guest_address) const;
   void* insert(uint64_t guest_address, std::span<const uint8_t> code);
   void* insert_standalone(std::span<const uint8_t> code);
 
+  Type type() const { return type_; }
   size_t max_block_count() const { return max_blocks; }
   const std::atomic_uint32_t* block_translation_table() const { return block_to_offset.get(); }
 
