@@ -4,6 +4,7 @@
 #include <base/Platform.hpp>
 
 #ifdef PLATFORM_MAC
+
 #include <libkern/OSCacheControl.h>
 #include <sys/mman.h>
 
@@ -28,11 +29,41 @@ static void protect_executable_memory() {
 static void flush_instruction_cache(void* memory, size_t size) {
   sys_icache_invalidate(memory, size);
 }
+
+#elif defined(PLATFORM_LINUX)
+
+#include <sys/mman.h>
+
+static void* allocate_executable_memory(size_t size) {
+  const auto p =
+    mmap(nullptr, size, PROT_EXEC | PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  return p != MAP_FAILED ? p : nullptr;
+}
+
+static void free_executable_memory(void* p, size_t size) {
+  munmap(p, size);
+}
+
+static void unprotect_executable_memory() {}
+
+static void protect_executable_memory() {}
+
+static void flush_instruction_cache(void* memory, size_t size) {
+  (void)memory;
+  (void)size;
+}
+
+#else
+#error "Unsupported platform"
 #endif
 
 ExecutableBuffer::ExecutableBuffer(size_t size) : size_(size) {
   memory_ = reinterpret_cast<uint8_t*>(allocate_executable_memory(size));
   verify(memory_, "failed to allocate {} bytes of executable memory", size);
+}
+
+ExecutableBuffer::ExecutableBuffer(const void* data, size_t size) : ExecutableBuffer(size) {
+  write(0, data, size);
 }
 
 ExecutableBuffer::~ExecutableBuffer() {

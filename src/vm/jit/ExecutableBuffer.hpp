@@ -12,6 +12,7 @@ class ExecutableBuffer {
   CLASS_NON_COPYABLE_NON_MOVABLE(ExecutableBuffer)
 
   explicit ExecutableBuffer(size_t size);
+  ExecutableBuffer(const void* data, size_t size);
   ~ExecutableBuffer();
 
   void write(uintptr_t offset, const void* data, size_t size);

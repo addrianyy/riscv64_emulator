@@ -772,7 +772,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
     code_dump->write(pc, instruction_bytes);
   }
 
-  if (true) {
+  if (false) {
     log_debug("generated code for {:x}: {} instructions...", pc, instructions.size());
   }
 
