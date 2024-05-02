@@ -1,0 +1,7 @@
+#pragma once
+
+#define BASE_UNNAMED_STATIC_GLOBAL_CONCAT(a, b) BASE_UNNAMED_STATIC_GLOBAL_CONCAT_INNER(a, b)
+#define BASE_UNNAMED_STATIC_GLOBAL_CONCAT_INNER(a, b) a##b
+
+#define UNNAMED_STATIC_GLOBAL(type) \
+  static type BASE_UNNAMED_STATIC_GLOBAL_CONCAT(_base_unnamed_global, __LINE__)

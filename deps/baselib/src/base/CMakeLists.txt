@@ -1,0 +1,39 @@
+add_subdirectory(concurrency)
+add_subdirectory(containers)
+add_subdirectory(hash)
+add_subdirectory(rng)
+add_subdirectory(time)
+add_subdirectory(global)
+
+target_sources(baselib PRIVATE
+    ClassTraits.cpp
+    ClassTraits.hpp
+    Error.cpp
+    Error.hpp
+    File.cpp
+    File.hpp
+    Format.cpp
+    Format.hpp
+    Initialization.cpp
+    Initialization.hpp
+    Log.cpp
+    Log.hpp
+    Platform.cpp
+    Platform.hpp
+    Print.cpp
+    Print.hpp
+    EnumBitOperations.cpp
+    EnumBitOperations.hpp
+    Iterator.cpp
+    Iterator.hpp
+    Deferred.hpp
+    Deferred.cpp
+    Casting.hpp
+    Casting.cpp
+    Parsing.cpp
+    Parsing.hpp
+    SumType.hpp
+    SumType.cpp
+    Overload.cpp
+    Overload.hpp
+)
