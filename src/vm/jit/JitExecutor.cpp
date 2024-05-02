@@ -74,7 +74,7 @@ static uint64_t memory_access_size_log2(InstructionType type) {
 }
 
 struct CodeGenerator {
-  a64::Assembler& assembler;
+  a64::Assembler& as;
   const Memory& memory;
 
   size_t max_code_blocks{};
@@ -107,9 +107,9 @@ struct CodeGenerator {
     verify(reg != Register::Pc, "cannot load PC as GPR");
 
     if (reg == Register::Zero) {
-      assembler.mov(target, 0);
+      as.mov(target, 0);
     } else {
-      assembler.ldr(target, register_state_reg, uint32_t(reg) * sizeof(uint64_t));
+      as.ldr(target, register_state_reg, uint32_t(reg) * sizeof(uint64_t));
     }
   }
 
@@ -126,7 +126,7 @@ struct CodeGenerator {
     verify(reg != Register::Pc, "cannot store PC as GPR");
 
     if (reg != Register::Zero) {
-      assembler.str(source, register_state_reg, uint32_t(reg) * sizeof(uint64_t));
+      as.str(source, register_state_reg, uint32_t(reg) * sizeof(uint64_t));
     }
   }
 
@@ -136,12 +136,12 @@ struct CodeGenerator {
 
     // Roughly estimate if it's worth trying to use pc-based immediates.
     if (pc_offset >= -max_pc_delta && pc_offset <= max_pc_delta) {
-      if (assembler.try_add_i(target, base_pc_reg, pc_offset)) {
+      if (as.try_add_i(target, base_pc_reg, pc_offset)) {
         return;
       }
     }
 
-    assembler.macro_mov(target, immediate);
+    as.macro_mov(target, immediate);
   }
   void load_immediate_u(A64R target, uint64_t immediate) {
     return load_immediate(target, int64_t(immediate));
@@ -167,9 +167,9 @@ struct CodeGenerator {
     load_register(value_reg, reg);
 
     if (offset != 0) {
-      if (!assembler.try_add_i(value_reg, value_reg, offset)) {
+      if (!as.try_add_i(value_reg, value_reg, offset)) {
         load_immediate(scratch_reg, offset);
-        assembler.add(value_reg, value_reg, scratch_reg);
+        as.add(value_reg, value_reg, scratch_reg);
       }
     }
   }
@@ -178,12 +178,12 @@ struct CodeGenerator {
   void generate_exit(JitExitReasonInternal reason, uint64_t pc) {
     load_immediate_u(exit_reason_reg, uint64_t(reason));
     load_immediate_u(exit_pc_reg, pc);
-    assembler.ret();
+    as.ret();
   }
   void generate_exit(JitExitReasonInternal reason, A64R pc) {
     load_immediate_u(exit_reason_reg, uint64_t(reason));
-    assembler.mov(exit_pc_reg, pc);
-    assembler.ret();
+    as.mov(exit_pc_reg, pc);
+    as.ret();
   }
 
   void add_pending_exit(a64::Label label, JitExitReasonInternal reason) {
@@ -205,7 +205,7 @@ struct CodeGenerator {
   }
   void generate_pending_exits() {
     for (const auto& pending_exit : pending_exits) {
-      assembler.insert_label(pending_exit.label);
+      as.insert_label(pending_exit.label);
 
       if (pending_exit.pc_register != A64R::Xzr) {
         generate_exit(pending_exit.reason, pending_exit.pc_register);
@@ -216,21 +216,21 @@ struct CodeGenerator {
   }
 
   void generate_memory_translate(A64R address_reg, uint64_t access_size_log2, bool write) {
-    const auto fault_label = assembler.allocate_label();
+    const auto fault_label = as.allocate_label();
 
     // Make sure that address is aligned otherwise the bound check later won't be accurate.
     if (access_size_log2 > 0) {
-      assembler.tst(address_reg, (1 << access_size_log2) - 1);
-      assembler.b(a64::Condition::NotZero, fault_label);
+      as.tst(address_reg, (1 << access_size_log2) - 1);
+      as.b(a64::Condition::NotZero, fault_label);
     }
 
     // Check if address >= memory_size. We don't need to account for the access size because we
     // have already checked for alignment.
-    assembler.cmp(address_reg, memory_size_reg);
-    assembler.b(a64::Condition::UnsignedGreaterEqual, fault_label);
+    as.cmp(address_reg, memory_size_reg);
+    as.b(a64::Condition::UnsignedGreaterEqual, fault_label);
 
     // Calculate real memory address.
-    assembler.add(address_reg, memory_base_reg, address_reg);
+    as.add(address_reg, memory_base_reg, address_reg);
 
     add_pending_exit(fault_label, write ? JitExitReasonInternal::MemoryWriteFault
                                         : JitExitReasonInternal::MemoryReadFault);
@@ -239,21 +239,21 @@ struct CodeGenerator {
   a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
     if (multithreaded_code_buffer) {
-      assembler.add(block_offset_reg, block_base_reg, block_offset_reg);
-      assembler.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
+      as.add(block_offset_reg, block_base_reg, block_offset_reg);
+      as.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
     } else {
-      assembler.ldr(cast_to_32bit(block_offset_reg), block_base_reg, block_offset_reg);
+      as.ldr(cast_to_32bit(block_offset_reg), block_base_reg, block_offset_reg);
     }
 
     const auto code_offset_reg = block_offset_reg;
 
     // Exit the VM if the block isn't generated yet.
-    const auto no_block_label = assembler.allocate_label();
-    assembler.cbz(code_offset_reg, no_block_label);
+    const auto no_block_label = as.allocate_label();
+    as.cbz(code_offset_reg, no_block_label);
 
     // Jump to the block.
-    assembler.add(code_offset_reg, code_base_reg, code_offset_reg);
-    assembler.br(code_offset_reg);
+    as.add(code_offset_reg, code_base_reg, code_offset_reg);
+    as.br(code_offset_reg);
 
     return no_block_label;
   }
@@ -283,19 +283,19 @@ struct CodeGenerator {
   }
 
   void generate_dynamic_branch(A64R target_pc, A64R scratch_reg) {
-    const auto oob_label = assembler.allocate_label();
-    const auto unaligned_label = assembler.allocate_label();
+    const auto oob_label = as.allocate_label();
+    const auto unaligned_label = as.allocate_label();
 
     // Mask off last bit as is required by the architecture.
-    assembler.and_(target_pc, target_pc, ~uint64_t(1));
+    as.and_(target_pc, target_pc, ~uint64_t(1));
 
     // Exit the VM if the address is not properly aligned.
-    assembler.tst(target_pc, 0b11);
-    assembler.b(a64::Condition::NotZero, unaligned_label);
+    as.tst(target_pc, 0b11);
+    as.b(a64::Condition::NotZero, unaligned_label);
 
     // Exit the VM if target_pc >= max_executable_pc.
-    assembler.cmp(target_pc, max_executable_pc_reg);
-    assembler.b(a64::Condition::UnsignedGreaterEqual, oob_label);
+    as.cmp(target_pc, max_executable_pc_reg);
+    as.b(a64::Condition::UnsignedGreaterEqual, oob_label);
 
     if (single_step) {
       // Exit the VM to make sure that we don't execute 2 instructions when single stepping
@@ -378,14 +378,14 @@ struct CodeGenerator {
         const auto a = load_register_or_zero(A64R::X10, instruction.rs1());
         const auto b = load_register_or_zero(A64R::X11, instruction.rs2());
 
-        const auto skip_label = assembler.allocate_label();
+        const auto skip_label = as.allocate_label();
 
-        assembler.cmp(a, b);
-        assembler.b(condition, skip_label);
+        as.cmp(a, b);
+        as.b(condition, skip_label);
 
         generate_static_branch(current_pc + instruction.imm(), A64R::X10);
 
-        assembler.insert_label(skip_label);
+        as.insert_label(skip_label);
 
         break;
       }
@@ -406,13 +406,13 @@ struct CodeGenerator {
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Lb:  assembler.ldrsb(value_reg, address_reg, 0); break;
-          case IT::Lh:  assembler.ldrsh(value_reg, address_reg, 0); break;
-          case IT::Lw:  assembler.ldrsw(value_reg, address_reg, 0); break;
-          case IT::Ld:  assembler.ldr(value_reg, address_reg, 0); break;
-          case IT::Lbu: assembler.ldrb(value_reg, address_reg, 0); break;
-          case IT::Lhu: assembler.ldrh(value_reg, address_reg, 0); break;
-          case IT::Lwu: assembler.ldr(cast_to_32bit(value_reg), address_reg, 0); break;
+          case IT::Lb:  as.ldrsb(value_reg, address_reg, 0); break;
+          case IT::Lh:  as.ldrsh(value_reg, address_reg, 0); break;
+          case IT::Lw:  as.ldrsw(value_reg, address_reg, 0); break;
+          case IT::Ld:  as.ldr(value_reg, address_reg, 0); break;
+          case IT::Lbu: as.ldrb(value_reg, address_reg, 0); break;
+          case IT::Lhu: as.ldrh(value_reg, address_reg, 0); break;
+          case IT::Lwu: as.ldr(cast_to_32bit(value_reg), address_reg, 0); break;
             // clang-format on
 
           default:
@@ -439,10 +439,10 @@ struct CodeGenerator {
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Sb: assembler.strb(value_reg, address_reg, 0); break;
-          case IT::Sh: assembler.strh(value_reg, address_reg, 0); break;
-          case IT::Sw: assembler.str(cast_to_32bit(value_reg), address_reg, 0); break;
-          case IT::Sd: assembler.str(value_reg, address_reg, 0); break;
+          case IT::Sb: as.strb(value_reg, address_reg, 0); break;
+          case IT::Sh: as.strh(value_reg, address_reg, 0); break;
+          case IT::Sw: as.str(cast_to_32bit(value_reg), address_reg, 0); break;
+          case IT::Sd: as.str(value_reg, address_reg, 0); break;
             // clang-format on
 
           default:
@@ -471,24 +471,24 @@ struct CodeGenerator {
               succeeded = true;
             } else {
               if (a == a64::Register::Xzr) {
-                assembler.macro_mov(dest, imm);
+                as.macro_mov(dest, imm);
                 succeeded = true;
               } else {
-                succeeded = assembler.try_add_i(dest, a, imm);
+                succeeded = as.try_add_i(dest, a, imm);
               }
             }
 
             if (succeeded && instruction_type == InstructionType::Addiw) {
-              assembler.sxtw(dest, dest);
+              as.sxtw(dest, dest);
             }
 
             break;
           }
 
             // clang-format off
-          case IT::Xori:  succeeded = assembler.try_eor(dest, a, imm);  break;
-          case IT::Ori:   succeeded = assembler.try_orr(dest, a, imm);  break;
-          case IT::Andi:  succeeded = assembler.try_and_(dest, a, imm); break;
+          case IT::Xori:  succeeded = as.try_eor(dest, a, imm);  break;
+          case IT::Ori:   succeeded = as.try_orr(dest, a, imm);  break;
+          case IT::Andi:  succeeded = as.try_and_(dest, a, imm); break;
             // clang-format on
 
           default:
@@ -500,11 +500,11 @@ struct CodeGenerator {
 
           switch (instruction_type) {
               // clang-format off
-            case IT::Addi:  assembler.add(dest, a, b);  break;
-            case IT::Xori:  assembler.eor(dest, a, b);  break;
-            case IT::Ori:   assembler.orr(dest, a, b);  break;
-            case IT::Andi:  assembler.and_(dest, a, b); break;
-            case IT::Addiw: assembler.add(dest, a, b);  assembler.sxtw(dest, dest); break;
+            case IT::Addi:  as.add(dest, a, b);  break;
+            case IT::Xori:  as.eor(dest, a, b);  break;
+            case IT::Ori:   as.orr(dest, a, b);  break;
+            case IT::Andi:  as.and_(dest, a, b); break;
+            case IT::Addiw: as.add(dest, a, b);  as.sxtw(dest, dest); break;
               // clang-format on
 
             default:
@@ -533,12 +533,12 @@ struct CodeGenerator {
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Slli:  assembler.lsl(dest, a, shamt); break;
-          case IT::Srli:  assembler.lsr(dest, a, shamt); break;
-          case IT::Srai:  assembler.asr(dest, a, shamt); break;
-          case IT::Slliw: assembler.lsl(dest32, a32, shamt); assembler.sxtw(dest, dest); break;
-          case IT::Srliw: assembler.lsr(dest32, a32, shamt); assembler.sxtw(dest, dest); break;
-          case IT::Sraiw: assembler.asr(dest32, a32, shamt); assembler.sxtw(dest, dest); break;
+          case IT::Slli:  as.lsl(dest, a, shamt); break;
+          case IT::Srli:  as.lsr(dest, a, shamt); break;
+          case IT::Srai:  as.asr(dest, a, shamt); break;
+          case IT::Slliw: as.lsl(dest32, a32, shamt); as.sxtw(dest, dest); break;
+          case IT::Srliw: as.lsr(dest32, a32, shamt); as.sxtw(dest, dest); break;
+          case IT::Sraiw: as.asr(dest32, a32, shamt); as.sxtw(dest, dest); break;
             // clang-format on
 
           default:
@@ -556,9 +556,9 @@ struct CodeGenerator {
         const auto b = load_register_or_zero(A64R::X11, instruction.rs2());
         const auto dest = A64R::X12;
 
-        assembler.cmp(a, b);
-        assembler.cset(
-          dest, instruction_type == IT::Sltu ? a64::Condition::UnsignedLess : a64::Condition::Less);
+        as.cmp(a, b);
+        as.cset(dest,
+                instruction_type == IT::Sltu ? a64::Condition::UnsignedLess : a64::Condition::Less);
 
         store_register(instruction.rd(), dest);
 
@@ -571,13 +571,13 @@ struct CodeGenerator {
         const auto imm = instruction.imm();
         const auto dest = A64R::X12;
 
-        if (!assembler.try_cmp(a, imm)) {
+        if (!as.try_cmp(a, imm)) {
           const auto b = load_immediate_or_zero(A64R::X11, imm);
-          assembler.cmp(a, b);
+          as.cmp(a, b);
         }
 
-        assembler.cset(dest, instruction_type == IT::Sltiu ? a64::Condition::UnsignedLess
-                                                           : a64::Condition::Less);
+        as.cset(dest, instruction_type == IT::Sltiu ? a64::Condition::UnsignedLess
+                                                    : a64::Condition::Less);
 
         store_register(instruction.rd(), dest);
 
@@ -607,19 +607,19 @@ struct CodeGenerator {
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Add: assembler.add(dest, a, b); break;
-          case IT::Sub: assembler.sub(dest, a, b); break;
-          case IT::Xor: assembler.eor(dest, a, b); break;
-          case IT::Or:  assembler.orr(dest, a, b); break;
-          case IT::And: assembler.and_(dest, a, b); break;
-          case IT::Sll: assembler.lsl(dest, a, b); break;
-          case IT::Srl: assembler.lsr(dest, a, b); break;
-          case IT::Sra: assembler.asr(dest, a, b); break;
-          case IT::Addw: assembler.add(dest32, a32, b32); assembler.sxtw(dest, dest); break;
-          case IT::Subw: assembler.sub(dest32, a32, b32); assembler.sxtw(dest, dest); break;
-          case IT::Sllw: assembler.lsl(dest32, a32, b32); assembler.sxtw(dest, dest); break;
-          case IT::Srlw: assembler.lsr(dest32, a32, b32); assembler.sxtw(dest, dest); break;
-          case IT::Sraw: assembler.asr(dest32, a32, b32); assembler.sxtw(dest, dest); break;
+          case IT::Add: as.add(dest, a, b); break;
+          case IT::Sub: as.sub(dest, a, b); break;
+          case IT::Xor: as.eor(dest, a, b); break;
+          case IT::Or:  as.orr(dest, a, b); break;
+          case IT::And: as.and_(dest, a, b); break;
+          case IT::Sll: as.lsl(dest, a, b); break;
+          case IT::Srl: as.lsr(dest, a, b); break;
+          case IT::Sra: as.asr(dest, a, b); break;
+          case IT::Addw: as.add(dest32, a32, b32); as.sxtw(dest, dest); break;
+          case IT::Subw: as.sub(dest32, a32, b32); as.sxtw(dest, dest); break;
+          case IT::Sllw: as.lsl(dest32, a32, b32); as.sxtw(dest, dest); break;
+          case IT::Srlw: as.lsr(dest32, a32, b32); as.sxtw(dest, dest); break;
+          case IT::Sraw: as.asr(dest32, a32, b32); as.sxtw(dest, dest); break;
             // clang-format on
 
           default:
@@ -651,34 +651,34 @@ struct CodeGenerator {
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Mul:   assembler.mul(dest, a, b); break;
-          case IT::Mulw:  assembler.mul(dest32, a32, b32);  assembler.sxtw(dest, dest); break;
-          case IT::Div:   assembler.sdiv(dest, a, b); break;
-          case IT::Divw:  assembler.sdiv(dest32, a32, b32); assembler.sxtw(dest, dest); break;
-          case IT::Divu:  assembler.udiv(dest, a, b); break;
-          case IT::Divuw: assembler.udiv(dest32, a32, b32); assembler.sxtw(dest, dest); break;
+          case IT::Mul:   as.mul(dest, a, b); break;
+          case IT::Mulw:  as.mul(dest32, a32, b32);  as.sxtw(dest, dest); break;
+          case IT::Div:   as.sdiv(dest, a, b); break;
+          case IT::Divw:  as.sdiv(dest32, a32, b32); as.sxtw(dest, dest); break;
+          case IT::Divu:  as.udiv(dest, a, b); break;
+          case IT::Divuw: as.udiv(dest32, a32, b32); as.sxtw(dest, dest); break;
             // clang-format on
 
           case IT::Rem: {
-            assembler.sdiv(dest, a, b);
-            assembler.msub(dest, dest, b, a);
+            as.sdiv(dest, a, b);
+            as.msub(dest, dest, b, a);
             break;
           }
           case IT::Remu: {
-            assembler.udiv(dest, a, b);
-            assembler.msub(dest, dest, b, a);
+            as.udiv(dest, a, b);
+            as.msub(dest, dest, b, a);
             break;
           }
           case IT::Remw: {
-            assembler.sdiv(dest32, a32, b32);
-            assembler.msub(dest32, dest32, b32, a32);
-            assembler.sxtw(dest, dest);
+            as.sdiv(dest32, a32, b32);
+            as.msub(dest32, dest32, b32, a32);
+            as.sxtw(dest, dest);
             break;
           }
           case IT::Remuw: {
-            assembler.udiv(dest32, a32, b32);
-            assembler.msub(dest32, dest32, b32, a32);
-            assembler.sxtw(dest, dest);
+            as.udiv(dest32, a32, b32);
+            as.msub(dest32, dest32, b32, a32);
+            as.sxtw(dest, dest);
             break;
           }
 
@@ -724,7 +724,7 @@ struct CodeGenerator {
 
   void generate_block() {
     // We cannot use load_immediate here.
-    assembler.macro_mov(base_pc_reg, int64_t(base_pc));
+    as.macro_mov(base_pc_reg, int64_t(base_pc));
 
     while (true) {
       uint32_t instruction_encoded;
@@ -754,7 +754,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
   a64::Assembler assembler;
 
   CodeGenerator code_generator{
-    .assembler = assembler,
+    .as = assembler,
     .memory = memory,
     .max_code_blocks = code_buffer->max_block_count(),
 
@@ -772,7 +772,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
 
   code_generator.generate_block();
 
-  const auto instructions = code_generator.assembler.assembled_instructions();
+  const auto instructions = code_generator.as.assembled_instructions();
   const auto instruction_bytes = cast_instructions_to_bytes(instructions);
 
   if (code_dump) {
