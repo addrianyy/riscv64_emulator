@@ -21,10 +21,13 @@ enum class JitExitReason {
 };
 
 class JitCodeDump;
+struct JitCodegenContext;
 
 class JitExecutor {
   std::shared_ptr<JitCodeBuffer> code_buffer;
   std::unique_ptr<JitCodeDump> code_dump;
+
+  std::unique_ptr<JitCodegenContext> codegen_context;
 
   void* trampoline_fn = nullptr;
 

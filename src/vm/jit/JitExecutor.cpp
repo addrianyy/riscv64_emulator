@@ -27,6 +27,26 @@ enum class JitExitReasonInternal {
   Ebreak,
 };
 
+namespace vm {
+struct JitCodegenContext {
+  struct Exit {
+    a64::Label label;
+    JitExitReasonInternal reason{};
+    A64R pc_register{A64R::Xzr};
+    uint64_t pc_value{};
+  };
+  std::vector<Exit> pending_exits;
+  a64::Assembler assembler;
+
+  JitCodegenContext& prepare() {
+    pending_exits.clear();
+    assembler.clear();
+
+    return *this;
+  }
+};
+}  // namespace vm
+
 struct JitTrampolineBlock {
   uint64_t register_state;
   uint64_t memory_base;
@@ -84,13 +104,7 @@ struct CodeGenerator {
   uint64_t base_pc{};
   uint64_t current_pc{};
 
-  struct Exit {
-    a64::Label label;
-    JitExitReasonInternal reason{};
-    A64R pc_register{A64R::Xzr};
-    uint64_t pc_value{};
-  };
-  std::vector<Exit> pending_exits;
+  std::vector<JitCodegenContext::Exit>& pending_exits;
 
   constexpr static A64R register_state_reg = A64R::X0;
   constexpr static A64R memory_base_reg = A64R::X1;
@@ -751,10 +765,10 @@ struct CodeGenerator {
 };
 
 void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
-  a64::Assembler assembler;
+  auto& context = codegen_context->prepare();
 
   CodeGenerator code_generator{
-    .as = assembler,
+    .as = context.assembler,
     .memory = memory,
     .max_code_blocks = code_buffer->max_block_count(),
 
@@ -768,6 +782,8 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
 
     .base_pc = pc,
     .current_pc = pc,
+
+    .pending_exits = context.pending_exits,
   };
 
   code_generator.generate_block();
@@ -787,7 +803,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
 }
 
 void JitExecutor::generate_trampoline() {
-  a64::Assembler as;
+  auto& as = codegen_context->prepare().assembler;
 
   as.mov(A64R::X10, A64R::X0);
   as.stp(A64R::X10, A64R::X30, A64R::Sp, -16, a64::Writeback::Pre);
@@ -816,7 +832,7 @@ void JitExecutor::generate_trampoline() {
 }
 
 JitExecutor::JitExecutor(std::shared_ptr<JitCodeBuffer> code_buffer)
-    : code_buffer(std::move(code_buffer)) {
+    : code_buffer(std::move(code_buffer)), codegen_context(std::make_unique<JitCodegenContext>()) {
   generate_trampoline();
 
   if (true) {
