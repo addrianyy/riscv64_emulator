@@ -13,17 +13,16 @@ using namespace vm;
 
 using A64R = a64::Register;
 
-enum class JitExitReason {
+enum class JitExitReasonInternal {
   UnalignedPc,
+  OutOfBoundsPc,
   InstructionFetchFault,
+  BlockNotGenerated,
+  SingleStep,
   UndefinedInstruction,
   UnsupportedInstruction,
   MemoryReadFault,
   MemoryWriteFault,
-  BlockNotGenerated,
-  SingleStep,
-  BlockOutOfBounds,
-  DynamicBranchFailed,
   Ecall,
   Ebreak,
 };
@@ -166,13 +165,13 @@ struct CodeGenerator {
     }
   }
 
-  void generate_exit(JitExitReason reason) { generate_exit(reason, current_pc); }
-  void generate_exit(JitExitReason reason, uint64_t pc) {
+  void generate_exit(JitExitReasonInternal reason) { generate_exit(reason, current_pc); }
+  void generate_exit(JitExitReasonInternal reason, uint64_t pc) {
     load_immediate_u(exit_reason_reg, uint64_t(reason));
     load_immediate_u(exit_pc_reg, pc);
     assembler.ret();
   }
-  void generate_exit(JitExitReason reason, A64R pc) {
+  void generate_exit(JitExitReasonInternal reason, A64R pc) {
     load_immediate_u(exit_reason_reg, uint64_t(reason));
     assembler.mov(exit_pc_reg, pc);
     assembler.ret();
@@ -195,7 +194,8 @@ struct CodeGenerator {
 
     // Out of bounds access: exit the VM.
     assembler.insert_label(fault_label);
-    generate_exit(write ? JitExitReason::MemoryWriteFault : JitExitReason::MemoryReadFault);
+    generate_exit(write ? JitExitReasonInternal::MemoryWriteFault
+                        : JitExitReasonInternal::MemoryReadFault);
 
     // Continue the memory access.
     assembler.insert_label(continue_label);
@@ -227,50 +227,54 @@ struct CodeGenerator {
 
     // We can statically handle some error conditions.
     if ((target_pc & 3) != 0) {
-      return generate_exit(JitExitReason::UnalignedPc);
+      return generate_exit(JitExitReasonInternal::UnalignedPc);
     }
     if (block >= max_code_blocks) {
-      return generate_exit(JitExitReason::BlockOutOfBounds);
+      return generate_exit(JitExitReasonInternal::OutOfBoundsPc);
     }
 
     if (single_step) {
       // Exit the VM to make sure that we don't execute 2 instructions when single stepping
       // (branch + 1 instruction after the branch).
-      generate_exit(JitExitReason::SingleStep, target_pc);
+      generate_exit(JitExitReasonInternal::SingleStep, target_pc);
     } else {
       // Calculate the memory offset from `block_base`.
       load_immediate_u(scratch_reg, block * 4);
 
       generate_validated_branch_noexit(scratch_reg);
-      generate_exit(JitExitReason::BlockNotGenerated, target_pc);
+      generate_exit(JitExitReasonInternal::BlockNotGenerated, target_pc);
     }
   }
 
   void generate_dynamic_branch(A64R target_pc, A64R scratch_reg) {
-    const auto fault_label = assembler.allocate_label();
+    const auto oob_label = assembler.allocate_label();
+    const auto unaligned_label = assembler.allocate_label();
 
     // Mask off last bit as is required by the architecture.
     assembler.and_(target_pc, target_pc, ~uint64_t(1));
 
     // Exit the VM if the address is not properly aligned.
     assembler.tst(target_pc, 0b11);
-    assembler.b(a64::Condition::NotZero, fault_label);
+    assembler.b(a64::Condition::NotZero, unaligned_label);
 
     // Exit the VM if target_pc >= max_executable_pc.
     assembler.cmp(target_pc, max_executable_pc_reg);
-    assembler.b(a64::Condition::UnsignedGreaterEqual, fault_label);
+    assembler.b(a64::Condition::UnsignedGreaterEqual, oob_label);
 
     if (single_step) {
       // Exit the VM to make sure that we don't execute 2 instructions when single stepping
       // (branch + 1 instruction after the branch).
-      generate_exit(JitExitReason::SingleStep, target_pc);
+      generate_exit(JitExitReasonInternal::SingleStep, target_pc);
     } else {
       generate_validated_branch_noexit(scratch_reg);
-      generate_exit(JitExitReason::BlockNotGenerated, target_pc);
+      generate_exit(JitExitReasonInternal::BlockNotGenerated, target_pc);
     }
 
-    assembler.insert_label(fault_label);
-    generate_exit(JitExitReason::DynamicBranchFailed, target_pc);
+    assembler.insert_label(oob_label);
+    generate_exit(JitExitReasonInternal::OutOfBoundsPc, target_pc);
+
+    assembler.insert_label(unaligned_label);
+    generate_exit(JitExitReasonInternal::UnalignedPc, target_pc);
   }
 
   bool generate_instruction(const Instruction& instruction) {
@@ -657,7 +661,7 @@ struct CodeGenerator {
       case IT::Mulh:
       case IT::Mulhu:
       case IT::Mulhsu: {
-        generate_exit(JitExitReason::UnsupportedInstruction);
+        generate_exit(JitExitReasonInternal::UnsupportedInstruction);
         return false;
       }
 
@@ -666,15 +670,15 @@ struct CodeGenerator {
       }
 
       case IT::Ecall: {
-        generate_exit(JitExitReason::Ecall);
+        generate_exit(JitExitReasonInternal::Ecall);
         return false;
       }
       case IT::Ebreak: {
-        generate_exit(JitExitReason::Ebreak);
+        generate_exit(JitExitReasonInternal::Ebreak);
         return false;
       }
       case IT::Undefined: {
-        generate_exit(JitExitReason::UndefinedInstruction);
+        generate_exit(JitExitReasonInternal::UndefinedInstruction);
         return false;
       }
 
@@ -692,7 +696,7 @@ struct CodeGenerator {
     while (true) {
       uint32_t instruction_encoded;
       if (!memory.read(current_pc, instruction_encoded)) {
-        generate_exit(JitExitReason::InstructionFetchFault);
+        generate_exit(JitExitReasonInternal::InstructionFetchFault);
         break;
       }
 
@@ -704,7 +708,7 @@ struct CodeGenerator {
       current_pc += 4;
 
       if (single_step) {
-        generate_exit(JitExitReason::SingleStep);
+        generate_exit(JitExitReasonInternal::SingleStep);
         break;
       }
     }
@@ -785,7 +789,9 @@ JitExecutor::JitExecutor(std::shared_ptr<JitCodeBuffer> code_buffer)
 
 JitExecutor::~JitExecutor() = default;
 
-void JitExecutor::run(Memory& memory, Cpu& cpu) {
+JitExitReason JitExecutor::run(Memory& memory, Cpu& cpu) {
+  JitExitReasonInternal exit_reason{};
+
   while (true) {
     const auto pc = cpu.pc();
 
@@ -817,10 +823,30 @@ void JitExecutor::run(Memory& memory, Cpu& cpu) {
     ExecutionLog::print_execution_step(previous_register_state, cpu.register_state());
 #endif
 
-    const auto exit_reason = JitExitReason(trampoline_block.exit_reason);
-    if (exit_reason != JitExitReason::BlockNotGenerated &&
-        exit_reason != JitExitReason::SingleStep) {
+    exit_reason = JitExitReasonInternal(trampoline_block.exit_reason);
+    if (exit_reason != JitExitReasonInternal::BlockNotGenerated &&
+        exit_reason != JitExitReasonInternal::SingleStep) {
       break;
     }
+  }
+
+  using I = JitExitReasonInternal;
+  using O = JitExitReason;
+
+  switch (exit_reason) {
+      // clang-format off
+    case I::UnalignedPc: return O::UnalignedPc;
+    case I::OutOfBoundsPc: return O::OutOfBoundsPc;
+    case I::InstructionFetchFault: return O::InstructionFetchFault;
+    case I::UndefinedInstruction: return O::UndefinedInstruction;
+    case I::UnsupportedInstruction: return O::UnsupportedInstruction;
+    case I::MemoryReadFault: return O::MemoryReadFault;
+    case I::MemoryWriteFault: return O::MemoryWriteFault;
+    case I::Ecall: return O::Ecall;
+    case I::Ebreak: return O::Ebreak;
+      // clang-format on
+
+    default:
+      unreachable();
   }
 }

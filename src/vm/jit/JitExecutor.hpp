@@ -8,6 +8,18 @@
 
 namespace vm {
 
+enum class JitExitReason {
+  UnalignedPc,
+  OutOfBoundsPc,
+  InstructionFetchFault,
+  UndefinedInstruction,
+  UnsupportedInstruction,
+  MemoryReadFault,
+  MemoryWriteFault,
+  Ecall,
+  Ebreak,
+};
+
 class JitCodeDump;
 
 class JitExecutor {
@@ -24,7 +36,7 @@ class JitExecutor {
   explicit JitExecutor(std::shared_ptr<JitCodeBuffer> code_buffer);
   ~JitExecutor();
 
-  void run(Memory& memory, Cpu& cpu);
+  JitExitReason run(Memory& memory, Cpu& cpu);
 };
 
 }  // namespace vm

@@ -9,6 +9,7 @@ struct Exit {
   enum class Reason {
     None,
     UnalignedPc,
+    OutOfBoundsPc,
     InstructionFetchFault,
     UndefinedInstruction,
     MemoryReadFault,

@@ -23,10 +23,36 @@ Exit Vm::run(Cpu& cpu) {
 
   Exit exit{};
 
+  const auto simple_exit = [&](Exit::Reason reason) {
+    exit.reason = reason;
+    return exit;
+  };
+
   while (true) {
-    jit_executor->run(memory_, cpu);
-    if (!Interpreter::step(memory_, cpu, exit)) {
-      return exit;
+    const auto jit_exit_reason = jit_executor->run(memory_, cpu);
+
+    using JE = JitExitReason;
+    switch (jit_exit_reason) {
+        // clang-format off
+      case JE::UnalignedPc: return simple_exit(Exit::Reason::UnalignedPc);
+      case JE::OutOfBoundsPc: return simple_exit(Exit::Reason::OutOfBoundsPc);
+      case JE::InstructionFetchFault: return simple_exit(Exit::Reason::InstructionFetchFault);
+      case JE::UndefinedInstruction: return simple_exit(Exit::Reason::UndefinedInstruction);
+      case JE::Ecall: return simple_exit(Exit::Reason::Ecall);
+      case JE::Ebreak: return simple_exit(Exit::Reason::Ebreak);
+        // clang-format on
+
+      case JE::UnsupportedInstruction:
+      case JE::MemoryReadFault:
+      case JE::MemoryWriteFault: {
+        if (!Interpreter::step(memory_, cpu, exit)) {
+          return exit;
+        }
+        break;
+      }
+
+      default:
+        unreachable();
     }
   }
 }
