@@ -83,6 +83,14 @@ struct CodeGenerator {
   uint64_t base_pc{};
   uint64_t current_pc{};
 
+  struct Exit {
+    a64::Label label;
+    JitExitReasonInternal reason{};
+    A64R pc_register{A64R::Xzr};
+    uint64_t pc_value{};
+  };
+  std::vector<Exit> pending_exits;
+
   constexpr static A64R register_state_reg = A64R::X0;
   constexpr static A64R memory_base_reg = A64R::X1;
   constexpr static A64R memory_size_reg = A64R::X2;
@@ -177,9 +185,37 @@ struct CodeGenerator {
     assembler.ret();
   }
 
+  void add_pending_exit(a64::Label label, JitExitReasonInternal reason) {
+    add_pending_exit(label, reason, current_pc);
+  }
+  void add_pending_exit(a64::Label label, JitExitReasonInternal reason, uint64_t pc) {
+    pending_exits.push_back({
+      .label = label,
+      .reason = reason,
+      .pc_value = pc,
+    });
+  }
+  void add_pending_exit(a64::Label label, JitExitReasonInternal reason, A64R pc) {
+    pending_exits.push_back({
+      .label = label,
+      .reason = reason,
+      .pc_register = pc,
+    });
+  }
+  void generate_pending_exits() {
+    for (const auto& pending_exit : pending_exits) {
+      assembler.insert_label(pending_exit.label);
+
+      if (pending_exit.pc_register != A64R::Xzr) {
+        generate_exit(pending_exit.reason, pending_exit.pc_register);
+      } else {
+        generate_exit(pending_exit.reason, pending_exit.pc_value);
+      }
+    }
+  }
+
   void generate_memory_translate(A64R address_reg, uint64_t access_size_log2, bool write) {
     const auto fault_label = assembler.allocate_label();
-    const auto continue_label = assembler.allocate_label();
 
     // Make sure that address is aligned otherwise the bound check later won't be accurate.
     if (access_size_log2 > 0) {
@@ -187,23 +223,19 @@ struct CodeGenerator {
       assembler.b(a64::Condition::NotZero, fault_label);
     }
 
-    // Check if address < memory_size. We don't need to account for the access size because we
+    // Check if address >= memory_size. We don't need to account for the access size because we
     // have already checked for alignment.
     assembler.cmp(address_reg, memory_size_reg);
-    assembler.b(a64::Condition::UnsignedLess, continue_label);
+    assembler.b(a64::Condition::UnsignedGreaterEqual, fault_label);
 
-    // Out of bounds access: exit the VM.
-    assembler.insert_label(fault_label);
-    generate_exit(write ? JitExitReasonInternal::MemoryWriteFault
-                        : JitExitReasonInternal::MemoryReadFault);
-
-    // Continue the memory access.
-    assembler.insert_label(continue_label);
-
+    // Calculate real memory address.
     assembler.add(address_reg, memory_base_reg, address_reg);
+
+    add_pending_exit(fault_label, write ? JitExitReasonInternal::MemoryWriteFault
+                                        : JitExitReasonInternal::MemoryReadFault);
   }
 
-  void generate_validated_branch_noexit(A64R block_offset_reg) {
+  a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
     assembler.add(block_offset_reg, block_base_reg, block_offset_reg);
     assembler.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
@@ -218,8 +250,7 @@ struct CodeGenerator {
     assembler.add(code_offset_reg, code_base_reg, code_offset_reg);
     assembler.br(code_offset_reg);
 
-    assembler.insert_label(no_block_label);
-    // Callee must provide code that handles case where the block is not generated yet.
+    return no_block_label;
   }
 
   void generate_static_branch(uint64_t target_pc, A64R scratch_reg) {
@@ -241,8 +272,8 @@ struct CodeGenerator {
       // Calculate the memory offset from `block_base`.
       load_immediate_u(scratch_reg, block * 4);
 
-      generate_validated_branch_noexit(scratch_reg);
-      generate_exit(JitExitReasonInternal::BlockNotGenerated, target_pc);
+      const auto exit_label = generate_validated_branch(scratch_reg);
+      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, target_pc);
     }
   }
 
@@ -266,15 +297,12 @@ struct CodeGenerator {
       // (branch + 1 instruction after the branch).
       generate_exit(JitExitReasonInternal::SingleStep, target_pc);
     } else {
-      generate_validated_branch_noexit(scratch_reg);
-      generate_exit(JitExitReasonInternal::BlockNotGenerated, target_pc);
+      const auto exit_label = generate_validated_branch(scratch_reg);
+      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, target_pc);
     }
 
-    assembler.insert_label(oob_label);
-    generate_exit(JitExitReasonInternal::OutOfBoundsPc, target_pc);
-
-    assembler.insert_label(unaligned_label);
-    generate_exit(JitExitReasonInternal::UnalignedPc, target_pc);
+    add_pending_exit(oob_label, JitExitReasonInternal::OutOfBoundsPc, target_pc);
+    add_pending_exit(unaligned_label, JitExitReasonInternal::UnalignedPc, target_pc);
   }
 
   bool generate_instruction(const Instruction& instruction) {
@@ -712,6 +740,8 @@ struct CodeGenerator {
         break;
       }
     }
+
+    generate_pending_exits();
   }
 };
 
@@ -742,7 +772,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
     code_dump->write(pc, instruction_bytes);
   }
 
-  if (true) {
+  if (false) {
     log_info("jitted {:x}: {} instructions...", pc, instructions.size());
   }
 
