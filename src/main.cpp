@@ -2,12 +2,11 @@
 
 #include <base/Error.hpp>
 #include <base/Log.hpp>
+#include <base/Print.hpp>
 #include <base/time/Stopwatch.hpp>
 
 #include <vm/Cpu.hpp>
 #include <vm/Vm.hpp>
-
-#include <base/Print.hpp>
 
 int main() {
   vm::Vm vm{32 * 1024 * 1024};
