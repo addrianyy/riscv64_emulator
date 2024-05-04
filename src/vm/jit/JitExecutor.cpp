@@ -844,7 +844,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
     .single_step = false,
 #endif
 
-    .inline_branches = true,
+    .inline_branches = false,
 
     .pending_exits = context.pending_exits,
 
