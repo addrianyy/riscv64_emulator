@@ -96,10 +96,9 @@ static uint64_t memory_access_size_log2(InstructionType type) {
 struct CodeGenerator {
   a64::Assembler& as;
   const Memory& memory;
+  const JitCodeBuffer& code_buffer;
 
-  size_t max_code_blocks{};
   bool single_step{};
-  bool multithreaded_code_buffer{};
 
   uint64_t base_pc{};
   uint64_t current_pc{};
@@ -256,7 +255,7 @@ struct CodeGenerator {
 
   a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
-    if (multithreaded_code_buffer) {
+    if (code_buffer.type() == JitCodeBuffer::Type::Multithreaded) {
       as.add(block_offset_reg, block_base_reg, block_offset_reg);
       as.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
     } else {
@@ -283,7 +282,7 @@ struct CodeGenerator {
     if ((target_pc & 3) != 0) {
       return generate_exit(JitExitReasonInternal::UnalignedPc);
     }
-    if (block >= max_code_blocks) {
+    if (block >= code_buffer.max_block_count()) {
       return generate_exit(JitExitReasonInternal::OutOfBoundsPc);
     }
 
@@ -774,15 +773,13 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
   CodeGenerator code_generator{
     .as = context.assembler,
     .memory = memory,
-    .max_code_blocks = code_buffer->max_block_count(),
+    .code_buffer = *code_buffer,
 
 #ifdef PRINT_EXECUTION_LOG
     .single_step = true,
 #else
     .single_step = false,
 #endif
-
-    .multithreaded_code_buffer = code_buffer->type() == JitCodeBuffer::Type::Multithreaded,
 
     .base_pc = pc,
     .current_pc = pc,
