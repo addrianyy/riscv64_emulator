@@ -4,7 +4,7 @@
 
 #include <bit>
 
-using namespace vm::aarch64;
+using namespace vm::jit::aarch64;
 
 void RegisterCache::emit_register_load(A64R target, Register source) {
   as.ldr(target, RegisterAllocation::register_state, uint32_t(source) * sizeof(uint64_t));

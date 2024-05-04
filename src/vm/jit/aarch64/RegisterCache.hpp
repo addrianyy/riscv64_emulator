@@ -9,7 +9,7 @@
 
 #include <span>
 
-namespace vm::aarch64 {
+namespace vm::jit::aarch64 {
 
 class RegisterCache {
   constexpr static size_t cache_size = RegisterAllocation::cache_size;
@@ -79,4 +79,4 @@ class RegisterCache {
   void finish_instruction();
 };
 
-}  // namespace vm::aarch64
+}  // namespace vm::jit::aarch64

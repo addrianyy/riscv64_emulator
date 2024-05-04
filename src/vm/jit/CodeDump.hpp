@@ -5,15 +5,15 @@
 
 #include <base/File.hpp>
 
-namespace vm {
+namespace vm::jit {
 
-class JitCodeDump {
+class CodeDump {
   base::File file;
 
  public:
-  explicit JitCodeDump(const std::string& path);
+  explicit CodeDump(const std::string& path);
 
   void write(uint64_t pc, std::span<const uint8_t> code);
 };
 
-}  // namespace vm
+}  // namespace vm::jit

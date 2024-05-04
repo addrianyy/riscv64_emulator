@@ -1,14 +1,14 @@
-#include "JitCodeDump.hpp"
+#include "CodeDump.hpp"
 
 #include <base/Error.hpp>
 
-using namespace vm;
+using namespace vm::jit;
 
-JitCodeDump::JitCodeDump(const std::string& path) : file(path, "wb") {
+CodeDump::CodeDump(const std::string& path) : file(path, "wb") {
   verify(file, "failed to open jit dump for writing ({})", path);
 }
 
-void JitCodeDump::write(uint64_t pc, std::span<const uint8_t> code) {
+void CodeDump::write(uint64_t pc, std::span<const uint8_t> code) {
   const uint64_t address = pc;
   const uint64_t size = code.size();
 

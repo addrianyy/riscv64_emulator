@@ -16,8 +16,8 @@ int main() {
 
   {
     const auto max_executable_address = image.base + image.size;
-    vm.use_jit(std::make_shared<vm::JitCodeBuffer>(vm::JitCodeBuffer::Type::Singlethreaded,
-                                                   16 * 1024 * 1024, max_executable_address));
+    vm.use_jit(std::make_shared<vm::jit::CodeBuffer>(vm::jit::CodeBuffer::Type::Singlethreaded,
+                                                     16 * 1024 * 1024, max_executable_address));
   }
 
   vm::Cpu cpu;

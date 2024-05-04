@@ -3,7 +3,7 @@
 
 #include <iterator>
 
-namespace vm::aarch64 {
+namespace vm::jit::aarch64 {
 
 using A64R = a64::Register;
 
@@ -30,4 +30,4 @@ class RegisterAllocation {
   constexpr static size_t cache_size = std::size(cache);
 };
 
-}  // namespace vm::aarch64
+}  // namespace vm::jit::aarch64

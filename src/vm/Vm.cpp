@@ -1,19 +1,29 @@
 #include "Vm.hpp"
 #include "Interpreter.hpp"
 
-#include "jit/JitExecutor.hpp"
+#include "jit/CreateExecutor.hpp"
+#include "jit/Executor.hpp"
 
 #include "private/ExecutionLog.hpp"
 
 #include <base/Error.hpp>
+#include <base/Log.hpp>
 
 using namespace vm;
 
 Vm::Vm(size_t memory_size) : memory_(memory_size) {}
 Vm::~Vm() = default;
 
-void Vm::use_jit(std::shared_ptr<JitCodeBuffer> code_buffer) {
-  jit_executor = std::make_unique<JitExecutor>(std::move(code_buffer));
+void Vm::use_jit(std::shared_ptr<jit::CodeBuffer> code_buffer) {
+  std::unique_ptr<jit::CodeDump> code_dump;
+  if (true) {
+    code_dump = std::make_unique<jit::CodeDump>("jit_dump.asm");
+  }
+
+  jit_executor = jit::create_arch_specific_executor(std::move(code_buffer), std::move(code_dump));
+  if (!jit_executor) {
+    log_warn("couldn't create JIT executor for current platform");
+  }
 }
 
 Exit Vm::run(Cpu& cpu) {
@@ -31,7 +41,7 @@ Exit Vm::run(Cpu& cpu) {
   while (true) {
     const auto jit_exit_reason = jit_executor->run(memory_, cpu);
 
-    using JE = JitExitReason;
+    using JE = jit::ExitReason;
     switch (jit_exit_reason) {
         // clang-format off
       case JE::UnalignedPc: return simple_exit(Exit::Reason::UnalignedPc);

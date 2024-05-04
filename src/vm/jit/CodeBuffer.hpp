@@ -6,9 +6,9 @@
 
 #include "ExecutableBuffer.hpp"
 
-namespace vm {
+namespace vm::jit {
 
-class JitCodeBuffer {
+class CodeBuffer {
  public:
   enum class Type {
     Singlethreaded,
@@ -31,7 +31,7 @@ class JitCodeBuffer {
   uint32_t allocate_executable_memory(std::span<const uint8_t> code);
 
  public:
-  JitCodeBuffer(Type type, size_t size, size_t max_executable_guest_address);
+  CodeBuffer(Type type, size_t size, size_t max_executable_guest_address);
 
   void* get(uint64_t guest_address) const;
   void* insert(uint64_t guest_address, std::span<const uint8_t> code);
@@ -44,4 +44,4 @@ class JitCodeBuffer {
   void* code_buffer_base() const { return executable_buffer.address(0); }
 };
 
-}  // namespace vm
+}  // namespace vm::jit

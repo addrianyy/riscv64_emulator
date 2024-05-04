@@ -1,114 +1,20 @@
-#include "JitExecutor.hpp"
-#include "JitCodeDump.hpp"
-#include "aarch64/RegisterCache.hpp"
-
-#include <base/Error.hpp>
-#include <base/Log.hpp>
+#include "CodeGenerator.hpp"
+#include "Utilities.hpp"
 
 #include <vm/Instruction.hpp>
-#include <vm/private/ExecutionLog.hpp>
-
-#include <asmlib_a64/Assembler.hpp>
-
-#include <unordered_map>
 
 using namespace vm;
-
-using A64R = a64::Register;
-
-using aarch64::RegisterAllocation;
-using aarch64::RegisterCache;
-
-enum class JitExitReasonInternal {
-  UnalignedPc,
-  OutOfBoundsPc,
-  InstructionFetchFault,
-  BlockNotGenerated,
-  SingleStep,
-  UndefinedInstruction,
-  UnsupportedInstruction,
-  MemoryReadFault,
-  MemoryWriteFault,
-  Ecall,
-  Ebreak,
-};
-
-struct TrampolineBlock {
-  uint64_t register_state;
-  uint64_t memory_base;
-  uint64_t memory_size;
-  uint64_t block_base;
-  uint64_t max_executable_pc;
-  uint64_t code_base;
-  uint64_t entrypoint;
-
-  uint64_t exit_reason;
-  uint64_t exit_pc;
-};
-
-namespace vm {
-struct JitCodegenContext {
-  struct Exit {
-    a64::Label label;
-    JitExitReasonInternal reason{};
-    A64R pc_register{A64R::Xzr};
-    uint64_t pc_value{};
-    RegisterCache::StateSnapshot snapshot;
-  };
-  a64::Assembler assembler;
-  std::vector<Exit> pending_exits;
-
-  JitCodegenContext& prepare() {
-    assembler.clear();
-    pending_exits.clear();
-
-    return *this;
-  }
-};
-}  // namespace vm
-
-static std::span<const uint8_t> cast_instructions_to_bytes(std::span<const uint32_t> instructions) {
-  return std::span{reinterpret_cast<const uint8_t*>(instructions.data()),
-                   instructions.size() * sizeof(uint32_t)};
-}
-
-static uint64_t memory_access_size_log2(InstructionType type) {
-  using IT = InstructionType;
-
-  switch (type) {
-    case IT::Sb:
-    case IT::Lb:
-    case IT::Lbu:
-      return 0;
-
-    case IT::Sh:
-    case IT::Lh:
-    case IT::Lhu:
-      return 1;
-
-    case IT::Sw:
-    case IT::Lw:
-    case IT::Lwu:
-      return 2;
-
-    case IT::Sd:
-    case IT::Ld:
-      return 3;
-
-    default:
-      unreachable();
-  }
-}
+using namespace vm::jit::aarch64;
 
 struct CodeGenerator {
   a64::Assembler& as;
   const Memory& memory;
-  const JitCodeBuffer& code_buffer;
+  const jit::CodeBuffer& code_buffer;
 
   bool single_step{};
   bool inline_branches{};
 
-  std::vector<JitCodegenContext::Exit>& pending_exits;
+  std::vector<CodegenContext::Exit>& pending_exits;
 
   uint64_t base_pc{};
   uint64_t current_pc{};
@@ -162,14 +68,14 @@ struct CodeGenerator {
     return scratch_reg;
   }
 
-  void generate_exit(JitExitReasonInternal reason) { generate_exit(reason, current_pc); }
-  void generate_exit(JitExitReasonInternal reason, uint64_t pc) {
+  void generate_exit(ArchExitReason reason) { generate_exit(reason, current_pc); }
+  void generate_exit(ArchExitReason reason, uint64_t pc) {
     register_cache.flush_registers(register_cache.take_state_snapshot());
     load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     load_immediate_u(RegisterAllocation::exit_pc, pc);
     as.ret();
   }
-  void generate_exit(JitExitReasonInternal reason, A64R pc) {
+  void generate_exit(ArchExitReason reason, A64R pc) {
     register_cache.flush_registers(register_cache.take_state_snapshot());
     load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     as.mov(RegisterAllocation::exit_pc, pc);
@@ -177,7 +83,7 @@ struct CodeGenerator {
   }
 
   void add_pending_exit(a64::Label label,
-                        JitExitReasonInternal reason,
+                        ArchExitReason reason,
                         bool flush_registers,
                         uint64_t pc) {
     pending_exits.push_back({
@@ -188,10 +94,7 @@ struct CodeGenerator {
         flush_registers ? register_cache.take_state_snapshot() : RegisterCache::StateSnapshot{},
     });
   }
-  void add_pending_exit(a64::Label label,
-                        JitExitReasonInternal reason,
-                        bool flush_registers,
-                        A64R pc) {
+  void add_pending_exit(a64::Label label, ArchExitReason reason, bool flush_registers, A64R pc) {
     pending_exits.push_back({
       .label = label,
       .reason = reason,
@@ -234,15 +137,14 @@ struct CodeGenerator {
     // Calculate real memory address.
     as.add(translated_reg, RegisterAllocation::memory_base, address_reg);
 
-    add_pending_exit(
-      fault_label,
-      write ? JitExitReasonInternal::MemoryWriteFault : JitExitReasonInternal::MemoryReadFault,
-      true, current_pc);
+    add_pending_exit(fault_label,
+                     write ? ArchExitReason::MemoryWriteFault : ArchExitReason::MemoryReadFault,
+                     true, current_pc);
   }
 
   a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
-    if (code_buffer.type() == JitCodeBuffer::Type::Multithreaded) {
+    if (code_buffer.type() == jit::CodeBuffer::Type::Multithreaded) {
       as.add(block_offset_reg, RegisterAllocation::block_base, block_offset_reg);
       as.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
     } else {
@@ -268,22 +170,22 @@ struct CodeGenerator {
 
     // We can statically handle some error conditions.
     if ((target_pc & 3) != 0) {
-      return generate_exit(JitExitReasonInternal::UnalignedPc);
+      return generate_exit(ArchExitReason::UnalignedPc);
     }
     if (block >= code_buffer.max_block_count()) {
-      return generate_exit(JitExitReasonInternal::OutOfBoundsPc);
+      return generate_exit(ArchExitReason::OutOfBoundsPc);
     }
 
     if (single_step) {
       // Exit the VM to make sure that we don't execute 2 instructions when single stepping
       // (branch + 1 instruction after the branch).
-      generate_exit(JitExitReasonInternal::SingleStep, target_pc);
+      generate_exit(ArchExitReason::SingleStep, target_pc);
     } else {
       // Calculate the memory offset from `block_base`.
       load_immediate_u(scratch_reg, block * 4);
 
       const auto exit_label = generate_validated_branch(scratch_reg);
-      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, false, target_pc);
+      add_pending_exit(exit_label, ArchExitReason::BlockNotGenerated, false, target_pc);
     }
   }
 
@@ -307,14 +209,14 @@ struct CodeGenerator {
     if (single_step) {
       // Exit the VM to make sure that we don't execute 2 instructions when single stepping
       // (branch + 1 instruction after the branch).
-      generate_exit(JitExitReasonInternal::SingleStep, target_pc);
+      generate_exit(ArchExitReason::SingleStep, target_pc);
     } else {
       const auto exit_label = generate_validated_branch(scratch_reg);
-      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, false, target_pc);
+      add_pending_exit(exit_label, ArchExitReason::BlockNotGenerated, false, target_pc);
     }
 
-    add_pending_exit(oob_label, JitExitReasonInternal::OutOfBoundsPc, true, target_pc);
-    add_pending_exit(unaligned_label, JitExitReasonInternal::UnalignedPc, true, target_pc);
+    add_pending_exit(oob_label, ArchExitReason::OutOfBoundsPc, true, target_pc);
+    add_pending_exit(unaligned_label, ArchExitReason::UnalignedPc, true, target_pc);
   }
 
   bool generate_instruction(const Instruction& instruction) {
@@ -432,7 +334,7 @@ struct CodeGenerator {
         const auto translated_reg = RegisterAllocation::a_reg;
 
         generate_memory_translate(offseted_reg, translated_reg,
-                                  memory_access_size_log2(instruction_type), false);
+                                  utils::memory_access_size_log2(instruction_type), false);
 
         switch (instruction_type) {
             // clang-format off
@@ -467,7 +369,7 @@ struct CodeGenerator {
         const auto translated_reg = RegisterAllocation::a_reg;
 
         generate_memory_translate(offseted_reg, translated_reg,
-                                  memory_access_size_log2(instruction_type), true);
+                                  utils::memory_access_size_log2(instruction_type), true);
 
         switch (instruction_type) {
             // clang-format off
@@ -730,7 +632,7 @@ struct CodeGenerator {
       case IT::Mulh:
       case IT::Mulhu:
       case IT::Mulhsu: {
-        generate_exit(JitExitReasonInternal::UnsupportedInstruction);
+        generate_exit(ArchExitReason::UnsupportedInstruction);
         return false;
       }
 
@@ -739,15 +641,15 @@ struct CodeGenerator {
       }
 
       case IT::Ecall: {
-        generate_exit(JitExitReasonInternal::Ecall);
+        generate_exit(ArchExitReason::Ecall);
         return false;
       }
       case IT::Ebreak: {
-        generate_exit(JitExitReasonInternal::Ebreak);
+        generate_exit(ArchExitReason::Ebreak);
         return false;
       }
       case IT::Undefined: {
-        generate_exit(JitExitReasonInternal::UndefinedInstruction);
+        generate_exit(ArchExitReason::UndefinedInstruction);
         return false;
       }
 
@@ -764,7 +666,7 @@ struct CodeGenerator {
     while (true) {
       uint32_t instruction_encoded;
       if (!memory.read(current_pc, instruction_encoded)) {
-        generate_exit(JitExitReasonInternal::InstructionFetchFault);
+        generate_exit(ArchExitReason::InstructionFetchFault);
         break;
       }
 
@@ -781,7 +683,7 @@ struct CodeGenerator {
       current_pc += 4;
 
       if (single_step) {
-        generate_exit(JitExitReasonInternal::SingleStep);
+        generate_exit(ArchExitReason::SingleStep);
         break;
       }
     }
@@ -799,142 +701,22 @@ struct CodeGenerator {
   }
 };
 
-void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
-  auto& context = codegen_context->prepare();
+std::span<const uint32_t> jit::aarch64::generate_block_code(CodegenContext& context,
+                                                            const CodeBuffer& code_buffer,
+                                                            const Memory& memory,
+                                                            bool single_step,
+                                                            uint64_t pc) {
+  context.prepare();
 
   CodeGenerator code_generator{
     .as = context.assembler,
     .memory = memory,
-    .code_buffer = *code_buffer,
-
-#ifdef PRINT_EXECUTION_LOG
-    .single_step = true,
-#else
-    .single_step = false,
-#endif
-
-    .inline_branches = false,
-
+    .code_buffer = code_buffer,
+    .single_step = single_step,
     .pending_exits = context.pending_exits,
   };
 
   code_generator.generate_code(pc);
 
-  const auto instructions = code_generator.as.assembled_instructions();
-  const auto instruction_bytes = cast_instructions_to_bytes(instructions);
-
-  if (code_dump) {
-    code_dump->write(pc, instruction_bytes);
-  }
-
-  if (false) {
-    log_debug("generated code for {:x}: {} instructions...", pc, instructions.size());
-  }
-
-  return code_buffer->insert(pc, instruction_bytes);
-}
-
-void JitExecutor::generate_trampoline() {
-  using RA = RegisterAllocation;
-
-  auto& as = codegen_context->prepare().assembler;
-
-  constexpr auto block_reg = A64R::X10;
-
-  as.mov(block_reg, A64R::X0);
-
-  as.stp(block_reg, A64R::X30, A64R::Sp, -16, a64::Writeback::Pre);
-
-  as.ldr(RA::register_state, block_reg, offsetof(TrampolineBlock, register_state));
-  as.ldr(RA::memory_base, block_reg, offsetof(TrampolineBlock, memory_base));
-  as.ldr(RA::memory_size, block_reg, offsetof(TrampolineBlock, memory_size));
-  as.ldr(RA::block_base, block_reg, offsetof(TrampolineBlock, block_base));
-  as.ldr(RA::max_executable_pc, block_reg, offsetof(TrampolineBlock, max_executable_pc));
-  as.ldr(RA::code_base, block_reg, offsetof(TrampolineBlock, code_base));
-
-  as.ldr(block_reg, block_reg, offsetof(TrampolineBlock, entrypoint));
-  as.blr(block_reg);
-
-  as.ldp(block_reg, A64R::X30, A64R::Sp, 16, a64::Writeback::Post);
-
-  as.str(RA::exit_reason, block_reg, offsetof(TrampolineBlock, exit_reason));
-  as.str(RA::exit_pc, block_reg, offsetof(TrampolineBlock, exit_pc));
-
-  as.ret();
-
-  trampoline_fn =
-    code_buffer->insert_standalone(cast_instructions_to_bytes(as.assembled_instructions()));
-}
-
-JitExecutor::JitExecutor(std::shared_ptr<JitCodeBuffer> code_buffer)
-    : code_buffer(std::move(code_buffer)), codegen_context(std::make_unique<JitCodegenContext>()) {
-  generate_trampoline();
-
-  if (true) {
-    code_dump = std::make_unique<JitCodeDump>("jit_dump.bin");
-  }
-}
-
-JitExecutor::~JitExecutor() = default;
-
-JitExitReason JitExecutor::run(Memory& memory, Cpu& cpu) {
-  JitExitReasonInternal exit_reason{};
-
-  while (true) {
-    const auto pc = cpu.pc();
-
-    auto code = code_buffer->get(pc);
-    if (!code) {
-      code = generate_code(memory, pc);
-      verify(code, "failed to jit code at pc {:x}", pc);
-    }
-
-#ifdef PRINT_EXECUTION_LOG
-    const auto previous_register_state = cpu.register_state();
-#endif
-
-    TrampolineBlock trampoline_block{
-      .register_state = uint64_t(cpu.register_state().raw_table()),
-      .memory_base = uint64_t(memory.contents()),
-      .memory_size = memory.size(),
-      .block_base = uint64_t(code_buffer->block_translation_table()),
-      .max_executable_pc = code_buffer->max_block_count() * 4,
-      .code_base = uint64_t(code_buffer->code_buffer_base()),
-      .entrypoint = uint64_t(code),
-    };
-
-    reinterpret_cast<void (*)(TrampolineBlock*)>(trampoline_fn)(&trampoline_block);
-
-    cpu.set_reg(Register::Pc, trampoline_block.exit_pc);
-
-#ifdef PRINT_EXECUTION_LOG
-    ExecutionLog::print_execution_step(previous_register_state, cpu.register_state());
-#endif
-
-    exit_reason = JitExitReasonInternal(trampoline_block.exit_reason);
-    if (exit_reason != JitExitReasonInternal::BlockNotGenerated &&
-        exit_reason != JitExitReasonInternal::SingleStep) {
-      break;
-    }
-  }
-
-  using I = JitExitReasonInternal;
-  using O = JitExitReason;
-
-  switch (exit_reason) {
-      // clang-format off
-    case I::UnalignedPc: return O::UnalignedPc;
-    case I::OutOfBoundsPc: return O::OutOfBoundsPc;
-    case I::InstructionFetchFault: return O::InstructionFetchFault;
-    case I::UndefinedInstruction: return O::UndefinedInstruction;
-    case I::UnsupportedInstruction: return O::UnsupportedInstruction;
-    case I::MemoryReadFault: return O::MemoryReadFault;
-    case I::MemoryWriteFault: return O::MemoryWriteFault;
-    case I::Ecall: return O::Ecall;
-    case I::Ebreak: return O::Ebreak;
-      // clang-format on
-
-    default:
-      unreachable();
-  }
+  return code_generator.as.assembled_instructions();
 }
