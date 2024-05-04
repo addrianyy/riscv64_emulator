@@ -9,6 +9,8 @@
 
 #include <asmlib_a64/Assembler.hpp>
 
+#include <unordered_map>
+
 using namespace vm;
 
 using A64R = a64::Register;
@@ -35,12 +37,18 @@ struct JitCodegenContext {
     A64R pc_register{A64R::Xzr};
     uint64_t pc_value{};
   };
-  std::vector<Exit> pending_exits;
   a64::Assembler assembler;
+  std::vector<Exit> pending_exits;
+
+  std::vector<uint64_t> pc_stack;
+  std::unordered_map<uint64_t, a64::Label> pc_to_label;
 
   JitCodegenContext& prepare() {
-    pending_exits.clear();
     assembler.clear();
+    pending_exits.clear();
+
+    pc_stack.clear();
+    pc_to_label.clear();
 
     return *this;
   }
@@ -99,11 +107,15 @@ struct CodeGenerator {
   const JitCodeBuffer& code_buffer;
 
   bool single_step{};
+  bool inline_branches{};
+
+  std::vector<JitCodegenContext::Exit>& pending_exits;
+
+  std::vector<uint64_t>& pc_stack;
+  std::unordered_map<uint64_t, a64::Label>& pc_to_label;
 
   uint64_t base_pc{};
   uint64_t current_pc{};
-
-  std::vector<JitCodegenContext::Exit>& pending_exits;
 
   constexpr static auto register_state_reg = A64R::X0;
   constexpr static auto memory_base_reg = A64R::X1;
@@ -291,11 +303,24 @@ struct CodeGenerator {
       // (branch + 1 instruction after the branch).
       generate_exit(JitExitReasonInternal::SingleStep, target_pc);
     } else {
-      // Calculate the memory offset from `block_base`.
-      load_immediate_u(scratch_reg, block * 4);
+      if (inline_branches) {
+        if (const auto it = pc_to_label.find(target_pc); it != pc_to_label.end()) {
+          as.b(it->second);
+        } else {
+          const auto label = as.allocate_label();
 
-      const auto exit_label = generate_validated_branch(scratch_reg);
-      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, target_pc);
+          pc_to_label.insert({target_pc, label});
+          pc_stack.push_back(target_pc);
+
+          as.b(label);
+        }
+      } else {
+        // Calculate the memory offset from `block_base`.
+        load_immediate_u(scratch_reg, block * 4);
+
+        const auto exit_label = generate_validated_branch(scratch_reg);
+        add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, target_pc);
+      }
     }
   }
 
@@ -739,11 +764,28 @@ struct CodeGenerator {
     return true;
   }
 
-  void generate_block() {
-    // We cannot use load_immediate here.
-    as.macro_mov(base_pc_reg, int64_t(base_pc));
+  void generate_block(uint64_t block_pc) {
+    current_pc = block_pc;
 
     while (true) {
+      if (inline_branches) {
+        a64::Label label;
+
+        if (const auto it = pc_to_label.find(current_pc); it != pc_to_label.end()) {
+          label = it->second;
+
+          if (as.is_label_inserted(label)) {
+            as.b(label);
+            break;
+          }
+        } else {
+          label = as.allocate_label();
+        }
+
+        as.insert_label(label);
+        pc_to_label.insert({current_pc, label});
+      }
+
       uint32_t instruction_encoded;
       if (!memory.read(current_pc, instruction_encoded)) {
         generate_exit(JitExitReasonInternal::InstructionFetchFault);
@@ -761,6 +803,27 @@ struct CodeGenerator {
         generate_exit(JitExitReasonInternal::SingleStep);
         break;
       }
+    }
+  }
+
+  void generate_code(uint64_t pc) {
+    base_pc = pc;
+    current_pc = pc;
+
+    // We cannot use load_immediate here.
+    as.macro_mov(base_pc_reg, int64_t(base_pc));
+
+    if (inline_branches) {
+      pc_stack.push_back(pc);
+
+      while (!pc_stack.empty()) {
+        const auto block_pc = pc_stack.back();
+        pc_stack.pop_back();
+
+        generate_block(block_pc);
+      }
+    } else {
+      generate_block(pc);
     }
 
     generate_pending_exits();
@@ -781,13 +844,15 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
     .single_step = false,
 #endif
 
-    .base_pc = pc,
-    .current_pc = pc,
+    .inline_branches = true,
 
     .pending_exits = context.pending_exits,
+
+    .pc_stack = context.pc_stack,
+    .pc_to_label = context.pc_to_label,
   };
 
-  code_generator.generate_block();
+  code_generator.generate_code(pc);
 
   const auto instructions = code_generator.as.assembled_instructions();
   const auto instruction_bytes = cast_instructions_to_bytes(instructions);
