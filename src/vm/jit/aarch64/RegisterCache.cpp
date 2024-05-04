@@ -24,7 +24,8 @@ uint32_t RegisterCache::acquire_cache_slot() {
 void RegisterCache::free_cache_slots(uint32_t count) {
   base::StaticVector<uint16_t, cache_size> available_slots;
   for (size_t i = 0; i < std::size(slots); ++i) {
-    if (!slots[i].locked) {
+    const auto& slot = slots[i];
+    if (!slot.locked && slot.reg != Register::Zero) {
       available_slots.push_back(uint16_t(i));
     }
   }
