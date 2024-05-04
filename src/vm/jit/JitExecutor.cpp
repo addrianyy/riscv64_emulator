@@ -876,6 +876,7 @@ void JitExecutor::generate_trampoline() {
   constexpr auto block_reg = A64R::X10;
 
   as.mov(block_reg, A64R::X0);
+
   as.stp(block_reg, A64R::X30, A64R::Sp, -16, a64::Writeback::Pre);
 
   as.ldr(CG::register_state_reg, block_reg, offsetof(JitTrampolineBlock, register_state));
@@ -885,8 +886,8 @@ void JitExecutor::generate_trampoline() {
   as.ldr(CG::max_executable_pc_reg, block_reg, offsetof(JitTrampolineBlock, max_executable_pc));
   as.ldr(CG::code_base_reg, block_reg, offsetof(JitTrampolineBlock, code_base));
 
-  as.ldr(A64R::X10, block_reg, offsetof(JitTrampolineBlock, entrypoint));
-  as.blr(A64R::X10);
+  as.ldr(block_reg, block_reg, offsetof(JitTrampolineBlock, entrypoint));
+  as.blr(block_reg);
 
   as.ldp(block_reg, A64R::X30, A64R::Sp, 16, a64::Writeback::Post);
 
