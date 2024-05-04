@@ -1,3 +1,5 @@
+add_subdirectory(aarch64)
+
 target_sources(riscv64_emulator PRIVATE
     JitCodeBuffer.cpp
     JitCodeBuffer.hpp

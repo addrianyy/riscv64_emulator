@@ -1,5 +1,6 @@
 #include "JitExecutor.hpp"
 #include "JitCodeDump.hpp"
+#include "aarch64/RegisterCache.hpp"
 
 #include <base/Error.hpp>
 #include <base/Log.hpp>
@@ -15,6 +16,9 @@ using namespace vm;
 
 using A64R = a64::Register;
 
+using aarch64::RegisterAllocation;
+using aarch64::RegisterCache;
+
 enum class JitExitReasonInternal {
   UnalignedPc,
   OutOfBoundsPc,
@@ -29,33 +33,7 @@ enum class JitExitReasonInternal {
   Ebreak,
 };
 
-namespace vm {
-struct JitCodegenContext {
-  struct Exit {
-    a64::Label label;
-    JitExitReasonInternal reason{};
-    A64R pc_register{A64R::Xzr};
-    uint64_t pc_value{};
-  };
-  a64::Assembler assembler;
-  std::vector<Exit> pending_exits;
-
-  std::vector<uint64_t> pc_stack;
-  std::unordered_map<uint64_t, a64::Label> pc_to_label;
-
-  JitCodegenContext& prepare() {
-    assembler.clear();
-    pending_exits.clear();
-
-    pc_stack.clear();
-    pc_to_label.clear();
-
-    return *this;
-  }
-};
-}  // namespace vm
-
-struct JitTrampolineBlock {
+struct TrampolineBlock {
   uint64_t register_state;
   uint64_t memory_base;
   uint64_t memory_size;
@@ -67,6 +45,27 @@ struct JitTrampolineBlock {
   uint64_t exit_reason;
   uint64_t exit_pc;
 };
+
+namespace vm {
+struct JitCodegenContext {
+  struct Exit {
+    a64::Label label;
+    JitExitReasonInternal reason{};
+    A64R pc_register{A64R::Xzr};
+    uint64_t pc_value{};
+    RegisterCache::StateSnapshot snapshot;
+  };
+  a64::Assembler assembler;
+  std::vector<Exit> pending_exits;
+
+  JitCodegenContext& prepare() {
+    assembler.clear();
+    pending_exits.clear();
+
+    return *this;
+  }
+};
+}  // namespace vm
 
 static std::span<const uint8_t> cast_instructions_to_bytes(std::span<const uint32_t> instructions) {
   return std::span{reinterpret_cast<const uint8_t*>(instructions.data()),
@@ -111,53 +110,10 @@ struct CodeGenerator {
 
   std::vector<JitCodegenContext::Exit>& pending_exits;
 
-  std::vector<uint64_t>& pc_stack;
-  std::unordered_map<uint64_t, a64::Label>& pc_to_label;
-
   uint64_t base_pc{};
   uint64_t current_pc{};
 
-  constexpr static auto register_state_reg = A64R::X0;
-  constexpr static auto memory_base_reg = A64R::X1;
-  constexpr static auto memory_size_reg = A64R::X2;
-  constexpr static auto block_base_reg = A64R::X3;
-  constexpr static auto max_executable_pc_reg = A64R::X4;
-  constexpr static auto code_base_reg = A64R::X5;
-  constexpr static auto base_pc_reg = A64R::X6;
-
-  constexpr static auto a_reg = A64R::X10;
-  constexpr static auto b_reg = A64R::X11;
-  constexpr static auto c_reg = A64R::X12;
-
-  constexpr static auto exit_reason_reg = A64R::X0;
-  constexpr static auto exit_pc_reg = A64R::X1;
-
-  void load_register(A64R target, Register reg) {
-    verify(reg != Register::Pc, "cannot load PC as GPR");
-
-    if (reg == Register::Zero) {
-      as.mov(target, 0);
-    } else {
-      as.ldr(target, register_state_reg, uint32_t(reg) * sizeof(uint64_t));
-    }
-  }
-
-  A64R load_register_or_zero(A64R target, Register reg) {
-    if (reg == Register::Zero) {
-      return A64R::Xzr;
-    }
-
-    load_register(target, reg);
-    return target;
-  }
-
-  void store_register(Register reg, A64R source) {
-    verify(reg != Register::Pc, "cannot store PC as GPR");
-
-    if (reg != Register::Zero) {
-      as.str(source, register_state_reg, uint32_t(reg) * sizeof(uint64_t));
-    }
-  }
+  RegisterCache register_cache{as};
 
   void load_immediate(A64R target, int64_t immediate) {
     const auto pc_offset = int64_t(immediate) - int64_t(base_pc);
@@ -165,7 +121,7 @@ struct CodeGenerator {
 
     // Roughly estimate if it's worth trying to use pc-based immediates.
     if (pc_offset >= -max_pc_delta && pc_offset <= max_pc_delta) {
-      if (as.try_add_i(target, base_pc_reg, pc_offset)) {
+      if (as.try_add_i(target, RegisterAllocation::base_pc, pc_offset)) {
         return;
       }
     }
@@ -188,53 +144,67 @@ struct CodeGenerator {
     return load_immediate_or_zero(target, int64_t(immediate));
   }
 
-  void load_register_with_offset(A64R value_reg, A64R scratch_reg, Register reg, int64_t offset) {
-    if (reg == Register::Zero) {
-      return load_immediate(value_reg, offset);
+  A64R add_offset_to_register(A64R value_reg, A64R scratch_reg, int64_t offset) {
+    if (value_reg == A64R::Xzr) {
+      load_immediate(scratch_reg, offset);
+      return scratch_reg;
     }
 
-    load_register(value_reg, reg);
-
-    if (offset != 0) {
-      if (!as.try_add_i(value_reg, value_reg, offset)) {
-        load_immediate(scratch_reg, offset);
-        as.add(value_reg, value_reg, scratch_reg);
-      }
+    if (offset == 0) {
+      return value_reg;
     }
+
+    if (!as.try_add_i(scratch_reg, value_reg, offset)) {
+      load_immediate(scratch_reg, offset);
+      as.add(scratch_reg, value_reg, scratch_reg);
+    }
+
+    return scratch_reg;
   }
 
   void generate_exit(JitExitReasonInternal reason) { generate_exit(reason, current_pc); }
   void generate_exit(JitExitReasonInternal reason, uint64_t pc) {
-    load_immediate_u(exit_reason_reg, uint64_t(reason));
-    load_immediate_u(exit_pc_reg, pc);
+    register_cache.flush_registers(register_cache.take_state_snapshot());
+    load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
+    load_immediate_u(RegisterAllocation::exit_pc, pc);
     as.ret();
   }
   void generate_exit(JitExitReasonInternal reason, A64R pc) {
-    load_immediate_u(exit_reason_reg, uint64_t(reason));
-    as.mov(exit_pc_reg, pc);
+    register_cache.flush_registers(register_cache.take_state_snapshot());
+    load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
+    as.mov(RegisterAllocation::exit_pc, pc);
     as.ret();
   }
 
-  void add_pending_exit(a64::Label label, JitExitReasonInternal reason) {
-    add_pending_exit(label, reason, current_pc);
-  }
-  void add_pending_exit(a64::Label label, JitExitReasonInternal reason, uint64_t pc) {
+  void add_pending_exit(a64::Label label,
+                        JitExitReasonInternal reason,
+                        bool flush_registers,
+                        uint64_t pc) {
     pending_exits.push_back({
       .label = label,
       .reason = reason,
       .pc_value = pc,
+      .snapshot =
+        flush_registers ? register_cache.take_state_snapshot() : RegisterCache::StateSnapshot{},
     });
   }
-  void add_pending_exit(a64::Label label, JitExitReasonInternal reason, A64R pc) {
+  void add_pending_exit(a64::Label label,
+                        JitExitReasonInternal reason,
+                        bool flush_registers,
+                        A64R pc) {
     pending_exits.push_back({
       .label = label,
       .reason = reason,
       .pc_register = pc,
+      .snapshot =
+        flush_registers ? register_cache.take_state_snapshot() : RegisterCache::StateSnapshot{},
     });
   }
   void generate_pending_exits() {
     for (const auto& pending_exit : pending_exits) {
       as.insert_label(pending_exit.label);
+
+      register_cache.flush_registers(pending_exit.snapshot);
 
       if (pending_exit.pc_register != A64R::Xzr) {
         generate_exit(pending_exit.reason, pending_exit.pc_register);
@@ -244,7 +214,10 @@ struct CodeGenerator {
     }
   }
 
-  void generate_memory_translate(A64R address_reg, uint64_t access_size_log2, bool write) {
+  void generate_memory_translate(A64R address_reg,
+                                 A64R translated_reg,
+                                 uint64_t access_size_log2,
+                                 bool write) {
     const auto fault_label = as.allocate_label();
 
     // Make sure that address is aligned otherwise the bound check later won't be accurate.
@@ -255,23 +228,25 @@ struct CodeGenerator {
 
     // Check if address >= memory_size. We don't need to account for the access size because we
     // have already checked for alignment.
-    as.cmp(address_reg, memory_size_reg);
+    as.cmp(address_reg, RegisterAllocation::memory_size);
     as.b(a64::Condition::UnsignedGreaterEqual, fault_label);
 
     // Calculate real memory address.
-    as.add(address_reg, memory_base_reg, address_reg);
+    as.add(translated_reg, RegisterAllocation::memory_base, address_reg);
 
-    add_pending_exit(fault_label, write ? JitExitReasonInternal::MemoryWriteFault
-                                        : JitExitReasonInternal::MemoryReadFault);
+    add_pending_exit(
+      fault_label,
+      write ? JitExitReasonInternal::MemoryWriteFault : JitExitReasonInternal::MemoryReadFault,
+      true, current_pc);
   }
 
   a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
     if (code_buffer.type() == JitCodeBuffer::Type::Multithreaded) {
-      as.add(block_offset_reg, block_base_reg, block_offset_reg);
+      as.add(block_offset_reg, RegisterAllocation::block_base, block_offset_reg);
       as.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
     } else {
-      as.ldr(cast_to_32bit(block_offset_reg), block_base_reg, block_offset_reg);
+      as.ldr(cast_to_32bit(block_offset_reg), RegisterAllocation::block_base, block_offset_reg);
     }
 
     const auto code_offset_reg = block_offset_reg;
@@ -281,7 +256,8 @@ struct CodeGenerator {
     as.cbz(code_offset_reg, no_block_label);
 
     // Jump to the block.
-    as.add(code_offset_reg, code_base_reg, code_offset_reg);
+    register_cache.flush_registers(register_cache.take_state_snapshot());
+    as.add(code_offset_reg, RegisterAllocation::code_base, code_offset_reg);
     as.br(code_offset_reg);
 
     return no_block_label;
@@ -303,40 +279,29 @@ struct CodeGenerator {
       // (branch + 1 instruction after the branch).
       generate_exit(JitExitReasonInternal::SingleStep, target_pc);
     } else {
-      if (inline_branches) {
-        if (const auto it = pc_to_label.find(target_pc); it != pc_to_label.end()) {
-          as.b(it->second);
-        } else {
-          const auto label = as.allocate_label();
+      // Calculate the memory offset from `block_base`.
+      load_immediate_u(scratch_reg, block * 4);
 
-          pc_to_label.insert({target_pc, label});
-          pc_stack.push_back(target_pc);
-
-          as.b(label);
-        }
-      } else {
-        // Calculate the memory offset from `block_base`.
-        load_immediate_u(scratch_reg, block * 4);
-
-        const auto exit_label = generate_validated_branch(scratch_reg);
-        add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, target_pc);
-      }
+      const auto exit_label = generate_validated_branch(scratch_reg);
+      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, false, target_pc);
     }
   }
 
   void generate_dynamic_branch(A64R target_pc, A64R scratch_reg) {
+    verify(target_pc != scratch_reg, "target_pc cannot be equal to scratch_reg");
+
     const auto oob_label = as.allocate_label();
     const auto unaligned_label = as.allocate_label();
 
     // Mask off last bit as is required by the architecture.
-    as.and_(target_pc, target_pc, ~uint64_t(1));
+    as.and_(scratch_reg, target_pc, ~uint64_t(1));
 
     // Exit the VM if the address is not properly aligned.
-    as.tst(target_pc, 0b11);
+    as.tst(scratch_reg, 0b11);
     as.b(a64::Condition::NotZero, unaligned_label);
 
     // Exit the VM if target_pc >= max_executable_pc.
-    as.cmp(target_pc, max_executable_pc_reg);
+    as.cmp(scratch_reg, RegisterAllocation::max_executable_pc);
     as.b(a64::Condition::UnsignedGreaterEqual, oob_label);
 
     if (single_step) {
@@ -345,11 +310,11 @@ struct CodeGenerator {
       generate_exit(JitExitReasonInternal::SingleStep, target_pc);
     } else {
       const auto exit_label = generate_validated_branch(scratch_reg);
-      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, target_pc);
+      add_pending_exit(exit_label, JitExitReasonInternal::BlockNotGenerated, false, target_pc);
     }
 
-    add_pending_exit(oob_label, JitExitReasonInternal::OutOfBoundsPc, target_pc);
-    add_pending_exit(unaligned_label, JitExitReasonInternal::UnalignedPc, target_pc);
+    add_pending_exit(oob_label, JitExitReasonInternal::OutOfBoundsPc, true, target_pc);
+    add_pending_exit(unaligned_label, JitExitReasonInternal::UnalignedPc, true, target_pc);
   }
 
   bool generate_instruction(const Instruction& instruction) {
@@ -359,37 +324,56 @@ struct CodeGenerator {
 
     switch (instruction_type) {
       case IT::Lui: {
-        load_immediate(a_reg, instruction.imm());
-        store_register(instruction.rd(), a_reg);
+        if (const auto rd = instruction.rd(); rd != Register::Zero) {
+          const auto reg = register_cache.lock_register(rd);
+          load_immediate(reg, instruction.imm());
+          register_cache.unlock_register_dirty(reg);
+        }
       }
 
       case IT::Auipc: {
-        load_immediate_u(a_reg, current_pc + instruction.imm());
-        store_register(instruction.rd(), a_reg);
+        if (const auto rd = instruction.rd(); rd != Register::Zero) {
+          const auto reg = register_cache.lock_register(rd);
+          load_immediate_u(reg, current_pc + instruction.imm());
+          register_cache.unlock_register_dirty(reg);
+        }
         break;
       }
 
       case InstructionType::Jal: {
         if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          load_immediate_u(a_reg, current_pc + 4);
-          store_register(rd, a_reg);
+          const auto reg = register_cache.lock_register(rd);
+          load_immediate_u(reg, current_pc + 4);
+          register_cache.unlock_register_dirty(reg);
         }
 
         const auto target = current_pc + instruction.imm();
-        generate_static_branch(target, a_reg);
+        generate_static_branch(target, RegisterAllocation::a_reg);
 
         return false;
       }
 
       case InstructionType::Jalr: {
-        load_register_with_offset(a_reg, b_reg, instruction.rs1(), instruction.imm());
+        const auto target_reg = register_cache.lock_register(instruction.rs1());
+        auto offseted_reg =
+          add_offset_to_register(target_reg, RegisterAllocation::a_reg, instruction.imm());
 
         if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          load_immediate_u(b_reg, current_pc + 4);
-          store_register(rd, b_reg);
+          const auto dest_reg = register_cache.lock_register(rd);
+
+          if (dest_reg == offseted_reg) {
+            as.mov(RegisterAllocation::a_reg, offseted_reg);
+            offseted_reg = RegisterAllocation::a_reg;
+          }
+
+          load_immediate_u(dest_reg, current_pc + 4);
+
+          register_cache.unlock_register_dirty(dest_reg);
         }
 
-        generate_dynamic_branch(a_reg, b_reg);
+        generate_dynamic_branch(offseted_reg, RegisterAllocation::b_reg);
+
+        register_cache.unlock_register(target_reg);
 
         return false;
       }
@@ -417,17 +401,18 @@ struct CodeGenerator {
             unreachable();
         }
 
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
-        const auto b = load_register_or_zero(b_reg, instruction.rs2());
+        const auto [a, b] = register_cache.lock_registers(instruction.rs1(), instruction.rs2());
 
         const auto skip_label = as.allocate_label();
 
         as.cmp(a, b);
         as.b(condition, skip_label);
 
-        generate_static_branch(current_pc + instruction.imm(), a_reg);
+        generate_static_branch(current_pc + instruction.imm(), RegisterAllocation::a_reg);
 
         as.insert_label(skip_label);
+
+        register_cache.unlock_registers(a, b);
 
         break;
       }
@@ -439,29 +424,33 @@ struct CodeGenerator {
       case IT::Lbu:
       case IT::Lhu:
       case IT::Lwu: {
-        const auto address_reg = a_reg;
-        const auto scratch_reg = b_reg;
-        const auto value_reg = b_reg;
+        const auto [address_reg, dest_reg] =
+          register_cache.lock_registers(instruction.rs1(), instruction.rd());
 
-        load_register_with_offset(address_reg, scratch_reg, instruction.rs1(), instruction.imm());
-        generate_memory_translate(address_reg, memory_access_size_log2(instruction_type), false);
+        const auto offseted_reg =
+          add_offset_to_register(address_reg, RegisterAllocation::a_reg, instruction.imm());
+        const auto translated_reg = RegisterAllocation::a_reg;
+
+        generate_memory_translate(offseted_reg, translated_reg,
+                                  memory_access_size_log2(instruction_type), false);
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Lb:  as.ldrsb(value_reg, address_reg, 0); break;
-          case IT::Lh:  as.ldrsh(value_reg, address_reg, 0); break;
-          case IT::Lw:  as.ldrsw(value_reg, address_reg, 0); break;
-          case IT::Ld:  as.ldr(value_reg, address_reg, 0); break;
-          case IT::Lbu: as.ldrb(value_reg, address_reg, 0); break;
-          case IT::Lhu: as.ldrh(value_reg, address_reg, 0); break;
-          case IT::Lwu: as.ldr(cast_to_32bit(value_reg), address_reg, 0); break;
+          case IT::Lb:  as.ldrsb(dest_reg, translated_reg, 0); break;
+          case IT::Lh:  as.ldrsh(dest_reg, translated_reg, 0); break;
+          case IT::Lw:  as.ldrsw(dest_reg, translated_reg, 0); break;
+          case IT::Ld:  as.ldr(dest_reg, translated_reg, 0); break;
+          case IT::Lbu: as.ldrb(dest_reg, translated_reg, 0); break;
+          case IT::Lhu: as.ldrh(dest_reg, translated_reg, 0); break;
+          case IT::Lwu: as.ldr(cast_to_32bit(dest_reg), translated_reg, 0); break;
             // clang-format on
 
           default:
             unreachable();
         }
 
-        store_register(instruction.rd(), value_reg);
+        register_cache.unlock_register(address_reg);
+        register_cache.unlock_register_dirty(dest_reg);
 
         break;
       }
@@ -470,26 +459,29 @@ struct CodeGenerator {
       case IT::Sh:
       case IT::Sw:
       case IT::Sd: {
-        const auto address_reg = a_reg;
-        const auto scratch_reg = b_reg;
-        const auto value_reg = b_reg;
+        const auto [address_reg, value_reg] =
+          register_cache.lock_registers(instruction.rs1(), instruction.rs2());
 
-        load_register_with_offset(address_reg, scratch_reg, instruction.rs1(), instruction.imm());
-        generate_memory_translate(address_reg, memory_access_size_log2(instruction_type), true);
+        const auto offseted_reg =
+          add_offset_to_register(address_reg, RegisterAllocation::a_reg, instruction.imm());
+        const auto translated_reg = RegisterAllocation::a_reg;
 
-        load_register(value_reg, instruction.rs2());
+        generate_memory_translate(offseted_reg, translated_reg,
+                                  memory_access_size_log2(instruction_type), true);
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Sb: as.strb(value_reg, address_reg, 0); break;
-          case IT::Sh: as.strh(value_reg, address_reg, 0); break;
-          case IT::Sw: as.str(cast_to_32bit(value_reg), address_reg, 0); break;
-          case IT::Sd: as.str(value_reg, address_reg, 0); break;
+          case IT::Sb: as.strb(value_reg, translated_reg, 0); break;
+          case IT::Sh: as.strh(value_reg, translated_reg, 0); break;
+          case IT::Sw: as.str(cast_to_32bit(value_reg), translated_reg, 0); break;
+          case IT::Sd: as.str(value_reg, translated_reg, 0); break;
             // clang-format on
 
           default:
             unreachable();
         }
+
+        register_cache.unlock_registers(address_reg, value_reg);
 
         break;
       }
@@ -499,9 +491,8 @@ struct CodeGenerator {
       case IT::Ori:
       case IT::Andi:
       case IT::Addiw: {
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
+        const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
         const auto imm = instruction.imm();
-        auto dest = c_reg;
 
         bool succeeded = false;
 
@@ -509,7 +500,7 @@ struct CodeGenerator {
           case IT::Addi:
           case IT::Addiw: {
             if (imm == 0) {
-              dest = a;
+              as.mov(dest, a);
               succeeded = true;
             } else {
               if (a == a64::Register::Xzr) {
@@ -538,7 +529,7 @@ struct CodeGenerator {
         }
 
         if (!succeeded) {
-          const auto b = load_immediate_or_zero(b_reg, instruction.imm());
+          const auto b = load_immediate_or_zero(RegisterAllocation::a_reg, imm);
 
           switch (instruction_type) {
               // clang-format off
@@ -554,7 +545,8 @@ struct CodeGenerator {
           }
         }
 
-        store_register(instruction.rd(), dest);
+        register_cache.unlock_register(a);
+        register_cache.unlock_register_dirty(dest);
 
         break;
       }
@@ -565,8 +557,7 @@ struct CodeGenerator {
       case IT::Slliw:
       case IT::Srliw:
       case IT::Sraiw: {
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
-        const auto dest = b_reg;
+        const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
 
         const auto a32 = cast_to_32bit(a);
         const auto dest32 = cast_to_32bit(dest);
@@ -587,41 +578,42 @@ struct CodeGenerator {
             unreachable();
         }
 
-        store_register(instruction.rd(), dest);
+        register_cache.unlock_register(a);
+        register_cache.unlock_register_dirty(dest);
 
         break;
       }
 
       case IT::Slt:
       case IT::Sltu: {
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
-        const auto b = load_register_or_zero(b_reg, instruction.rs2());
-        const auto dest = c_reg;
+        const auto [a, b, dest] =
+          register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
 
         as.cmp(a, b);
         as.cset(dest,
                 instruction_type == IT::Sltu ? a64::Condition::UnsignedLess : a64::Condition::Less);
 
-        store_register(instruction.rd(), dest);
+        register_cache.unlock_registers(a, b);
+        register_cache.unlock_register_dirty(dest);
 
         break;
       }
 
       case IT::Slti:
       case IT::Sltiu: {
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
+        const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
         const auto imm = instruction.imm();
-        const auto dest = c_reg;
 
         if (!as.try_cmp(a, imm)) {
-          const auto b = load_immediate_or_zero(b_reg, imm);
+          const auto b = load_immediate_or_zero(RegisterAllocation::a_reg, imm);
           as.cmp(a, b);
         }
 
         as.cset(dest, instruction_type == IT::Sltiu ? a64::Condition::UnsignedLess
                                                     : a64::Condition::Less);
 
-        store_register(instruction.rd(), dest);
+        register_cache.unlock_register(a);
+        register_cache.unlock_register_dirty(dest);
 
         break;
       }
@@ -639,9 +631,8 @@ struct CodeGenerator {
       case IT::Sllw:
       case IT::Srlw:
       case IT::Sraw: {
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
-        const auto b = load_register_or_zero(b_reg, instruction.rs2());
-        const auto dest = c_reg;
+        const auto [a, b, dest] =
+          register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
 
         const auto a32 = cast_to_32bit(a);
         const auto b32 = cast_to_32bit(b);
@@ -668,7 +659,8 @@ struct CodeGenerator {
             unreachable();
         }
 
-        store_register(instruction.rd(), dest);
+        register_cache.unlock_registers(a, b);
+        register_cache.unlock_register_dirty(dest);
 
         break;
       }
@@ -683,13 +675,14 @@ struct CodeGenerator {
       case IT::Remu:
       case IT::Remw:
       case IT::Remuw: {
-        const auto a = load_register_or_zero(a_reg, instruction.rs1());
-        const auto b = load_register_or_zero(b_reg, instruction.rs2());
-        const auto dest = c_reg;
+        const auto [a, b, dest] =
+          register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+        const auto tmp = RegisterAllocation::a_reg;
 
         const auto a32 = cast_to_32bit(a);
         const auto b32 = cast_to_32bit(b);
         const auto dest32 = cast_to_32bit(dest);
+        const auto tmp32 = cast_to_32bit(tmp);
 
         switch (instruction_type) {
             // clang-format off
@@ -702,25 +695,25 @@ struct CodeGenerator {
             // clang-format on
 
           case IT::Rem: {
-            as.sdiv(dest, a, b);
-            as.msub(dest, dest, b, a);
+            as.sdiv(tmp, a, b);
+            as.msub(dest, tmp, b, a);
             break;
           }
           case IT::Remu: {
-            as.udiv(dest, a, b);
-            as.msub(dest, dest, b, a);
+            as.udiv(tmp, a, b);
+            as.msub(dest, tmp, b, a);
             break;
           }
           case IT::Remw: {
-            as.sdiv(dest32, a32, b32);
-            as.msub(dest32, dest32, b32, a32);
-            as.sxtw(dest, dest);
+            as.sdiv(tmp32, a32, b32);
+            as.msub(dest32, tmp32, b32, a32);
+            as.sxtw(dest, dest32);
             break;
           }
           case IT::Remuw: {
-            as.udiv(dest32, a32, b32);
-            as.msub(dest32, dest32, b32, a32);
-            as.sxtw(dest, dest);
+            as.udiv(tmp32, a32, b32);
+            as.msub(dest32, tmp32, b32, a32);
+            as.sxtw(dest, dest32);
             break;
           }
 
@@ -728,7 +721,8 @@ struct CodeGenerator {
             unreachable();
         }
 
-        store_register(instruction.rd(), dest);
+        register_cache.unlock_registers(a, b);
+        register_cache.unlock_register_dirty(dest);
 
         break;
       }
@@ -768,24 +762,6 @@ struct CodeGenerator {
     current_pc = block_pc;
 
     while (true) {
-      if (inline_branches) {
-        a64::Label label;
-
-        if (const auto it = pc_to_label.find(current_pc); it != pc_to_label.end()) {
-          label = it->second;
-
-          if (as.is_label_inserted(label)) {
-            as.b(label);
-            break;
-          }
-        } else {
-          label = as.allocate_label();
-        }
-
-        as.insert_label(label);
-        pc_to_label.insert({current_pc, label});
-      }
-
       uint32_t instruction_encoded;
       if (!memory.read(current_pc, instruction_encoded)) {
         generate_exit(JitExitReasonInternal::InstructionFetchFault);
@@ -793,7 +769,12 @@ struct CodeGenerator {
       }
 
       Instruction instruction{instruction_encoded};
-      if (!generate_instruction(instruction)) {
+
+      const auto continue_execution = generate_instruction(instruction);
+
+      register_cache.finish_instruction();
+
+      if (!continue_execution) {
         break;
       }
 
@@ -811,21 +792,9 @@ struct CodeGenerator {
     current_pc = pc;
 
     // We cannot use load_immediate here.
-    as.macro_mov(base_pc_reg, int64_t(base_pc));
+    as.macro_mov(RegisterAllocation::base_pc, int64_t(base_pc));
 
-    if (inline_branches) {
-      pc_stack.push_back(pc);
-
-      while (!pc_stack.empty()) {
-        const auto block_pc = pc_stack.back();
-        pc_stack.pop_back();
-
-        generate_block(block_pc);
-      }
-    } else {
-      generate_block(pc);
-    }
-
+    generate_block(pc);
     generate_pending_exits();
   }
 };
@@ -847,9 +816,6 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
     .inline_branches = false,
 
     .pending_exits = context.pending_exits,
-
-    .pc_stack = context.pc_stack,
-    .pc_to_label = context.pc_to_label,
   };
 
   code_generator.generate_code(pc);
@@ -869,7 +835,7 @@ void* JitExecutor::generate_code(const Memory& memory, uint64_t pc) {
 }
 
 void JitExecutor::generate_trampoline() {
-  using CG = CodeGenerator;
+  using RA = RegisterAllocation;
 
   auto& as = codegen_context->prepare().assembler;
 
@@ -879,20 +845,20 @@ void JitExecutor::generate_trampoline() {
 
   as.stp(block_reg, A64R::X30, A64R::Sp, -16, a64::Writeback::Pre);
 
-  as.ldr(CG::register_state_reg, block_reg, offsetof(JitTrampolineBlock, register_state));
-  as.ldr(CG::memory_base_reg, block_reg, offsetof(JitTrampolineBlock, memory_base));
-  as.ldr(CG::memory_size_reg, block_reg, offsetof(JitTrampolineBlock, memory_size));
-  as.ldr(CG::block_base_reg, block_reg, offsetof(JitTrampolineBlock, block_base));
-  as.ldr(CG::max_executable_pc_reg, block_reg, offsetof(JitTrampolineBlock, max_executable_pc));
-  as.ldr(CG::code_base_reg, block_reg, offsetof(JitTrampolineBlock, code_base));
+  as.ldr(RA::register_state, block_reg, offsetof(TrampolineBlock, register_state));
+  as.ldr(RA::memory_base, block_reg, offsetof(TrampolineBlock, memory_base));
+  as.ldr(RA::memory_size, block_reg, offsetof(TrampolineBlock, memory_size));
+  as.ldr(RA::block_base, block_reg, offsetof(TrampolineBlock, block_base));
+  as.ldr(RA::max_executable_pc, block_reg, offsetof(TrampolineBlock, max_executable_pc));
+  as.ldr(RA::code_base, block_reg, offsetof(TrampolineBlock, code_base));
 
-  as.ldr(block_reg, block_reg, offsetof(JitTrampolineBlock, entrypoint));
+  as.ldr(block_reg, block_reg, offsetof(TrampolineBlock, entrypoint));
   as.blr(block_reg);
 
   as.ldp(block_reg, A64R::X30, A64R::Sp, 16, a64::Writeback::Post);
 
-  as.str(CG::exit_reason_reg, block_reg, offsetof(JitTrampolineBlock, exit_reason));
-  as.str(CG::exit_pc_reg, block_reg, offsetof(JitTrampolineBlock, exit_pc));
+  as.str(RA::exit_reason, block_reg, offsetof(TrampolineBlock, exit_reason));
+  as.str(RA::exit_pc, block_reg, offsetof(TrampolineBlock, exit_pc));
 
   as.ret();
 
@@ -927,7 +893,7 @@ JitExitReason JitExecutor::run(Memory& memory, Cpu& cpu) {
     const auto previous_register_state = cpu.register_state();
 #endif
 
-    JitTrampolineBlock trampoline_block{
+    TrampolineBlock trampoline_block{
       .register_state = uint64_t(cpu.register_state().raw_table()),
       .memory_base = uint64_t(memory.contents()),
       .memory_size = memory.size(),
@@ -937,7 +903,7 @@ JitExitReason JitExecutor::run(Memory& memory, Cpu& cpu) {
       .entrypoint = uint64_t(code),
     };
 
-    reinterpret_cast<void (*)(JitTrampolineBlock*)>(trampoline_fn)(&trampoline_block);
+    reinterpret_cast<void (*)(TrampolineBlock*)>(trampoline_fn)(&trampoline_block);
 
     cpu.set_reg(Register::Pc, trampoline_block.exit_pc);
 
