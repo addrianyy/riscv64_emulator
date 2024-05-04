@@ -7,6 +7,8 @@
 
 #include <base/containers/StaticVector.hpp>
 
+#include <span>
+
 namespace vm::aarch64 {
 
 class RegisterCache {
@@ -23,8 +25,10 @@ class RegisterCache {
   constexpr static auto invalid_id = std::numeric_limits<uint16_t>::max();
 
   a64::Assembler& as;
+  uint32_t program_counter = 0;
 
   struct Slot {
+    uint32_t last_use = 0;
     Register reg = Register::Zero;
     bool locked = false;
     bool dirty = false;
@@ -39,9 +43,13 @@ class RegisterCache {
   void emit_register_load(A64R target, Register source);
   void emit_register_store(Register target, A64R source);
 
-  uint32_t acquire_free_slot();
+  uint32_t acquire_cache_slot();
+  void free_cache_slots(uint32_t count);
 
-  bool try_reserve_register(Register reg);
+  void reserve_register(Register reg);
+  void reserve_registers(std::span<const Register> registers);
+
+  A64R lock_reserved_register(Register reg);
 
  public:
   explicit RegisterCache(a64::Assembler& as);
@@ -50,8 +58,11 @@ class RegisterCache {
 
   template <typename... Args>
   std::array<A64R, sizeof...(Args)> lock_registers(Args... args) {
-    (try_reserve_register(args), ...);
-    return std::array<A64R, sizeof...(Args)>{lock_register(args)...};
+    const std::array<Register, sizeof...(Args)> all_registers{args...};
+
+    reserve_registers(all_registers);
+
+    return std::array<A64R, sizeof...(Args)>{lock_reserved_register(args)...};
   }
 
   void unlock_register(A64R reg, bool make_dirty = false);
