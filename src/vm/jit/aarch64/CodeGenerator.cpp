@@ -12,7 +12,6 @@ struct CodeGenerator {
   const jit::CodeBuffer& code_buffer;
 
   bool single_step{};
-  bool inline_branches{};
 
   std::vector<CodegenContext::Exit>& pending_exits;
 

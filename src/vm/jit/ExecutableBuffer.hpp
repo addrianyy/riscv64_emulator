@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace vm::jit {
+
 class ExecutableBuffer {
   uint8_t* memory_{};
   size_t size_{};
@@ -20,3 +22,5 @@ class ExecutableBuffer {
   void* address(uintptr_t offset = 0) const { return memory_ + offset; }
   size_t size() const { return size_; }
 };
+
+}  // namespace vm::jit

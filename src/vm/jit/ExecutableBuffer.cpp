@@ -57,6 +57,8 @@ static void flush_instruction_cache(void* memory, size_t size) {
 #error "Unsupported platform"
 #endif
 
+using namespace vm::jit;
+
 ExecutableBuffer::ExecutableBuffer(size_t size) : size_(size) {
   memory_ = reinterpret_cast<uint8_t*>(allocate_executable_memory(size));
   verify(memory_, "failed to allocate {} bytes of executable memory", size);
