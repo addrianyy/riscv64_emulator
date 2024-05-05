@@ -326,33 +326,35 @@ struct CodeGenerator {
       case IT::Lbu:
       case IT::Lhu:
       case IT::Lwu: {
-        const auto [address_reg, dest_reg] =
-          register_cache.lock_registers(instruction.rs1(), instruction.rd());
+        if (instruction.rd() != Register::Zero) {
+          const auto [address_reg, dest_reg] =
+            register_cache.lock_registers(instruction.rs1(), instruction.rd());
 
-        const auto offseted_reg =
-          add_offset_to_register(address_reg, RegisterAllocation::a_reg, instruction.imm());
-        const auto translated_reg = RegisterAllocation::a_reg;
+          const auto offseted_reg =
+            add_offset_to_register(address_reg, RegisterAllocation::a_reg, instruction.imm());
+          const auto translated_reg = RegisterAllocation::a_reg;
 
-        generate_memory_translate(offseted_reg, translated_reg,
-                                  utils::memory_access_size_log2(instruction_type), false);
+          generate_memory_translate(offseted_reg, translated_reg,
+                                    utils::memory_access_size_log2(instruction_type), false);
 
-        switch (instruction_type) {
-            // clang-format off
-          case IT::Lb:  as.ldrsb(dest_reg, translated_reg, 0); break;
-          case IT::Lh:  as.ldrsh(dest_reg, translated_reg, 0); break;
-          case IT::Lw:  as.ldrsw(dest_reg, translated_reg, 0); break;
-          case IT::Ld:  as.ldr(dest_reg, translated_reg, 0); break;
-          case IT::Lbu: as.ldrb(dest_reg, translated_reg, 0); break;
-          case IT::Lhu: as.ldrh(dest_reg, translated_reg, 0); break;
-          case IT::Lwu: as.ldr(cast_to_32bit(dest_reg), translated_reg, 0); break;
-            // clang-format on
+          switch (instruction_type) {
+              // clang-format off
+            case IT::Lb:  as.ldrsb(dest_reg, translated_reg, 0); break;
+            case IT::Lh:  as.ldrsh(dest_reg, translated_reg, 0); break;
+            case IT::Lw:  as.ldrsw(dest_reg, translated_reg, 0); break;
+            case IT::Ld:  as.ldr(dest_reg, translated_reg, 0); break;
+            case IT::Lbu: as.ldrb(dest_reg, translated_reg, 0); break;
+            case IT::Lhu: as.ldrh(dest_reg, translated_reg, 0); break;
+            case IT::Lwu: as.ldr(cast_to_32bit(dest_reg), translated_reg, 0); break;
+              // clang-format on
 
-          default:
-            unreachable();
+            default:
+              unreachable();
+          }
+
+          register_cache.unlock_register(address_reg);
+          register_cache.unlock_register_dirty(dest_reg);
         }
-
-        register_cache.unlock_register(address_reg);
-        register_cache.unlock_register_dirty(dest_reg);
 
         break;
       }
@@ -393,62 +395,65 @@ struct CodeGenerator {
       case IT::Ori:
       case IT::Andi:
       case IT::Addiw: {
-        const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
-        const auto imm = instruction.imm();
+        if (instruction.rd() != Register::Zero) {
+          const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
+          const auto imm = instruction.imm();
 
-        bool succeeded = false;
-
-        switch (instruction_type) {
-          case IT::Addi:
-          case IT::Addiw: {
-            if (imm == 0) {
-              as.mov(dest, a);
-              succeeded = true;
-            } else {
-              if (a == a64::Register::Xzr) {
-                as.macro_mov(dest, imm);
-                succeeded = true;
-              } else {
-                succeeded = as.try_add_i(dest, a, imm);
-              }
-            }
-
-            if (succeeded && instruction_type == InstructionType::Addiw) {
-              as.sxtw(dest, dest);
-            }
-
-            break;
-          }
-
-            // clang-format off
-          case IT::Xori:  succeeded = as.try_eor(dest, a, imm);  break;
-          case IT::Ori:   succeeded = as.try_orr(dest, a, imm);  break;
-          case IT::Andi:  succeeded = as.try_and_(dest, a, imm); break;
-            // clang-format on
-
-          default:
-            unreachable();
-        }
-
-        if (!succeeded) {
-          const auto b = load_immediate_or_zero(RegisterAllocation::a_reg, imm);
+          bool succeeded = false;
 
           switch (instruction_type) {
+            case IT::Addi:
+            case IT::Addiw: {
+              if (imm == 0) {
+                as.mov(dest, a);
+                succeeded = true;
+              } else {
+                // Add takes SP as second operand so we need to to special case zero register.
+                if (a == a64::Register::Xzr) {
+                  load_immediate(dest, imm);
+                  succeeded = true;
+                } else {
+                  succeeded = as.try_add_i(dest, a, imm);
+                }
+              }
+
+              if (succeeded && instruction_type == InstructionType::Addiw) {
+                as.sxtw(dest, dest);
+              }
+
+              break;
+            }
+
               // clang-format off
-            case IT::Addi:  as.add(dest, a, b);  break;
-            case IT::Xori:  as.eor(dest, a, b);  break;
-            case IT::Ori:   as.orr(dest, a, b);  break;
-            case IT::Andi:  as.and_(dest, a, b); break;
-            case IT::Addiw: as.add(dest, a, b);  as.sxtw(dest, dest); break;
+            case IT::Xori:  succeeded = as.try_eor(dest, a, imm);  break;
+            case IT::Ori:   succeeded = as.try_orr(dest, a, imm);  break;
+            case IT::Andi:  succeeded = as.try_and_(dest, a, imm); break;
               // clang-format on
 
             default:
               unreachable();
           }
-        }
 
-        register_cache.unlock_register(a);
-        register_cache.unlock_register_dirty(dest);
+          if (!succeeded) {
+            const auto b = load_immediate_or_zero(RegisterAllocation::a_reg, imm);
+
+            switch (instruction_type) {
+                // clang-format off
+              case IT::Addi:  as.add(dest, a, b);  break;
+              case IT::Xori:  as.eor(dest, a, b);  break;
+              case IT::Ori:   as.orr(dest, a, b);  break;
+              case IT::Andi:  as.and_(dest, a, b); break;
+              case IT::Addiw: as.add(dest, a, b);  as.sxtw(dest, dest); break;
+                // clang-format on
+
+              default:
+                unreachable();
+            }
+          }
+
+          register_cache.unlock_register(a);
+          register_cache.unlock_register_dirty(dest);
+        }
 
         break;
       }
@@ -459,63 +464,81 @@ struct CodeGenerator {
       case IT::Slliw:
       case IT::Srliw:
       case IT::Sraiw: {
-        const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
+        if (instruction.rd() != Register::Zero) {
+          const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
 
-        const auto a32 = cast_to_32bit(a);
-        const auto dest32 = cast_to_32bit(dest);
+          const auto a32 = cast_to_32bit(a);
+          const auto dest32 = cast_to_32bit(dest);
 
-        const auto shamt = instruction.shamt();
+          const auto shamt = instruction.shamt();
 
-        switch (instruction_type) {
-            // clang-format off
-          case IT::Slli:  as.lsl(dest, a, shamt); break;
-          case IT::Srli:  as.lsr(dest, a, shamt); break;
-          case IT::Srai:  as.asr(dest, a, shamt); break;
-          case IT::Slliw: as.lsl(dest32, a32, shamt); as.sxtw(dest, dest); break;
-          case IT::Srliw: as.lsr(dest32, a32, shamt); as.sxtw(dest, dest); break;
-          case IT::Sraiw: as.asr(dest32, a32, shamt); as.sxtw(dest, dest); break;
-            // clang-format on
+          switch (instruction_type) {
+              // clang-format off
+            case IT::Slli:  as.lsl(dest, a, shamt); break;
+            case IT::Srli:  as.lsr(dest, a, shamt); break;
+            case IT::Srai:  as.asr(dest, a, shamt); break;
+            case IT::Slliw: as.lsl(dest32, a32, shamt); as.sxtw(dest, dest); break;
+            case IT::Srliw: as.lsr(dest32, a32, shamt); as.sxtw(dest, dest); break;
+            case IT::Sraiw: as.asr(dest32, a32, shamt); as.sxtw(dest, dest); break;
+              // clang-format on
 
-          default:
-            unreachable();
+            default:
+              unreachable();
+          }
+
+          register_cache.unlock_register(a);
+          register_cache.unlock_register_dirty(dest);
         }
-
-        register_cache.unlock_register(a);
-        register_cache.unlock_register_dirty(dest);
 
         break;
       }
 
       case IT::Slt:
       case IT::Sltu: {
-        const auto [a, b, dest] =
-          register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+        if (instruction.rd() != Register::Zero) {
+          const auto [a, b, dest] =
+            register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
 
-        as.cmp(a, b);
-        as.cset(dest,
-                instruction_type == IT::Sltu ? a64::Condition::UnsignedLess : a64::Condition::Less);
+          as.cmp(a, b);
+          as.cset(dest, instruction_type == IT::Sltu ? a64::Condition::UnsignedLess
+                                                     : a64::Condition::Less);
 
-        register_cache.unlock_registers(a, b);
-        register_cache.unlock_register_dirty(dest);
+          register_cache.unlock_registers(a, b);
+          register_cache.unlock_register_dirty(dest);
+        }
 
         break;
       }
 
       case IT::Slti:
       case IT::Sltiu: {
-        const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
-        const auto imm = instruction.imm();
+        if (instruction.rd() != Register::Zero) {
+          // cmp (immediate) takes SP as first operand so we need to special case zero register.
+          if (instruction.rs1() == Register::Zero) {
+            const auto dest = register_cache.lock_register(instruction.rd());
 
-        if (!as.try_cmp(a, imm)) {
-          const auto b = load_immediate_or_zero(RegisterAllocation::a_reg, imm);
-          as.cmp(a, b);
+            load_immediate_u(dest, instruction_type == InstructionType::Slti
+                                     ? (int64_t(0) < int64_t(instruction.imm()))
+                                     : (uint64_t(0) < uint64_t(instruction.imm())));
+
+            register_cache.unlock_register_dirty(dest);
+          } else {
+            const auto [a, dest] =
+              register_cache.lock_registers(instruction.rs1(), instruction.rd());
+            const auto imm = instruction.imm();
+
+            if (!as.try_cmp(a, imm)) {
+              const auto b = load_immediate_or_zero(RegisterAllocation::a_reg, imm);
+              as.cmp(a, b);
+            }
+
+            as.cset(dest, instruction_type == IT::Sltiu ? a64::Condition::UnsignedLess
+                                                        : a64::Condition::Less);
+
+            register_cache.unlock_register(a);
+            register_cache.unlock_register_dirty(dest);
+          }
         }
-
-        as.cset(dest, instruction_type == IT::Sltiu ? a64::Condition::UnsignedLess
-                                                    : a64::Condition::Less);
-
-        register_cache.unlock_register(a);
-        register_cache.unlock_register_dirty(dest);
 
         break;
       }
@@ -533,37 +556,38 @@ struct CodeGenerator {
       case IT::Sllw:
       case IT::Srlw:
       case IT::Sraw: {
-        const auto [a, b, dest] =
-          register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+        if (instruction.rd() != Register::Zero) {
+          const auto [a, b, dest] =
+            register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
 
-        const auto a32 = cast_to_32bit(a);
-        const auto b32 = cast_to_32bit(b);
-        const auto dest32 = cast_to_32bit(dest);
+          const auto a32 = cast_to_32bit(a);
+          const auto b32 = cast_to_32bit(b);
+          const auto dest32 = cast_to_32bit(dest);
 
-        switch (instruction_type) {
-            // clang-format off
-          case IT::Add: as.add(dest, a, b); break;
-          case IT::Sub: as.sub(dest, a, b); break;
-          case IT::Xor: as.eor(dest, a, b); break;
-          case IT::Or:  as.orr(dest, a, b); break;
-          case IT::And: as.and_(dest, a, b); break;
-          case IT::Sll: as.lsl(dest, a, b); break;
-          case IT::Srl: as.lsr(dest, a, b); break;
-          case IT::Sra: as.asr(dest, a, b); break;
-          case IT::Addw: as.add(dest32, a32, b32); as.sxtw(dest, dest); break;
-          case IT::Subw: as.sub(dest32, a32, b32); as.sxtw(dest, dest); break;
-          case IT::Sllw: as.lsl(dest32, a32, b32); as.sxtw(dest, dest); break;
-          case IT::Srlw: as.lsr(dest32, a32, b32); as.sxtw(dest, dest); break;
-          case IT::Sraw: as.asr(dest32, a32, b32); as.sxtw(dest, dest); break;
-            // clang-format on
+          switch (instruction_type) {
+              // clang-format off
+            case IT::Add: as.add(dest, a, b); break;
+            case IT::Sub: as.sub(dest, a, b); break;
+            case IT::Xor: as.eor(dest, a, b); break;
+            case IT::Or:  as.orr(dest, a, b); break;
+            case IT::And: as.and_(dest, a, b); break;
+            case IT::Sll: as.lsl(dest, a, b); break;
+            case IT::Srl: as.lsr(dest, a, b); break;
+            case IT::Sra: as.asr(dest, a, b); break;
+            case IT::Addw: as.add(dest32, a32, b32); as.sxtw(dest, dest); break;
+            case IT::Subw: as.sub(dest32, a32, b32); as.sxtw(dest, dest); break;
+            case IT::Sllw: as.lsl(dest32, a32, b32); as.sxtw(dest, dest); break;
+            case IT::Srlw: as.lsr(dest32, a32, b32); as.sxtw(dest, dest); break;
+            case IT::Sraw: as.asr(dest32, a32, b32); as.sxtw(dest, dest); break;
+              // clang-format on
 
-          default:
-            unreachable();
+            default:
+              unreachable();
+          }
+
+          register_cache.unlock_registers(a, b);
+          register_cache.unlock_register_dirty(dest);
         }
-
-        register_cache.unlock_registers(a, b);
-        register_cache.unlock_register_dirty(dest);
-
         break;
       }
 
@@ -577,56 +601,58 @@ struct CodeGenerator {
       case IT::Remu:
       case IT::Remw:
       case IT::Remuw: {
-        const auto [a, b, dest] =
-          register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
-        const auto tmp = RegisterAllocation::a_reg;
+        if (instruction.rd() != Register::Zero) {
+          const auto [a, b, dest] =
+            register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+          const auto tmp = RegisterAllocation::a_reg;
 
-        const auto a32 = cast_to_32bit(a);
-        const auto b32 = cast_to_32bit(b);
-        const auto dest32 = cast_to_32bit(dest);
-        const auto tmp32 = cast_to_32bit(tmp);
+          const auto a32 = cast_to_32bit(a);
+          const auto b32 = cast_to_32bit(b);
+          const auto dest32 = cast_to_32bit(dest);
+          const auto tmp32 = cast_to_32bit(tmp);
 
-        switch (instruction_type) {
-            // clang-format off
-          case IT::Mul:   as.mul(dest, a, b); break;
-          case IT::Mulw:  as.mul(dest32, a32, b32);  as.sxtw(dest, dest); break;
-          case IT::Div:   as.sdiv(dest, a, b); break;
-          case IT::Divw:  as.sdiv(dest32, a32, b32); as.sxtw(dest, dest); break;
-          case IT::Divu:  as.udiv(dest, a, b); break;
-          case IT::Divuw: as.udiv(dest32, a32, b32); as.sxtw(dest, dest); break;
-            // clang-format on
+          switch (instruction_type) {
+              // clang-format off
+            case IT::Mul:   as.mul(dest, a, b); break;
+            case IT::Mulw:  as.mul(dest32, a32, b32);  as.sxtw(dest, dest); break;
+            case IT::Div:   as.sdiv(dest, a, b); break;
+            case IT::Divw:  as.sdiv(dest32, a32, b32); as.sxtw(dest, dest); break;
+            case IT::Divu:  as.udiv(dest, a, b); break;
+            case IT::Divuw: as.udiv(dest32, a32, b32); as.sxtw(dest, dest); break;
+              // clang-format on
 
-          case IT::Rem: {
-            as.sdiv(tmp, a, b);
-            as.msub(dest, tmp, b, a);
-            break;
-          }
-          case IT::Remu: {
-            as.udiv(tmp, a, b);
-            as.msub(dest, tmp, b, a);
-            break;
-          }
-          case IT::Remw: {
-            as.sdiv(tmp32, a32, b32);
-            as.msub(dest32, tmp32, b32, a32);
-            as.sxtw(dest, dest32);
-            break;
-          }
-          case IT::Remuw: {
-            as.udiv(tmp32, a32, b32);
-            as.msub(dest32, tmp32, b32, a32);
-            as.sxtw(dest, dest32);
-            break;
+            case IT::Rem: {
+              as.sdiv(tmp, a, b);
+              as.msub(dest, tmp, b, a);
+              break;
+            }
+            case IT::Remu: {
+              as.udiv(tmp, a, b);
+              as.msub(dest, tmp, b, a);
+              break;
+            }
+            case IT::Remw: {
+              as.sdiv(tmp32, a32, b32);
+              as.msub(dest32, tmp32, b32, a32);
+              as.sxtw(dest, dest32);
+              break;
+            }
+            case IT::Remuw: {
+              as.udiv(tmp32, a32, b32);
+              as.msub(dest32, tmp32, b32, a32);
+              as.sxtw(dest, dest32);
+              break;
+            }
+
+            default:
+              unreachable();
           }
 
-          default:
-            unreachable();
+          register_cache.unlock_registers(a, b);
+          register_cache.unlock_register_dirty(dest);
+
+          break;
         }
-
-        register_cache.unlock_registers(a, b);
-        register_cache.unlock_register_dirty(dest);
-
-        break;
       }
 
       case IT::Mulh:
