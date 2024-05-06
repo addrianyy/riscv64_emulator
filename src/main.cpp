@@ -8,10 +8,18 @@
 #include <vm/Cpu.hpp>
 #include <vm/Vm.hpp>
 
-int main() {
+int main(int argc, const char* argv[]) {
+  if (argc != 2) {
+    log_info("usage: riscv64_emulator [elf image path]");
+    return 1;
+  }
+
+  const auto elf_path = argv[1];
+
   vm::Vm vm{32 * 1024 * 1024};
 
-  const auto image = ElfLoader::load("/Users/adrian/dev/rvtest/a.out", vm.memory());
+  log_info("loading {}...", elf_path);
+  const auto image = ElfLoader::load(elf_path, vm.memory());
   log_info("loaded elf at {:x} with size {:x}", image.base, image.size);
 
   {
@@ -26,8 +34,16 @@ int main() {
 
   base::Stopwatch stopwatch;
 
-  auto exit = vm.run(cpu);
+  const auto exit = vm.run(cpu);
+  const auto execution_time = stopwatch.elapsed();
 
-  log_info("{:x}: {}", cpu.pc(), cpu.reg(exit.target_register));
-  log_info("took {}", stopwatch.elapsed());
+  log_info("exited the VM in {} with reason: {}", execution_time, exit.reason);
+  log_info("pc: {:#x}", cpu.pc());
+  if (exit.reason == vm::Exit::Reason::MemoryReadFault ||
+      exit.reason == vm::Exit::Reason::MemoryWriteFault) {
+    log_info("faulty address: {:#x}", exit.faulty_address);
+    if (exit.reason == vm::Exit::Reason::MemoryWriteFault) {
+      log_info("written value: {}", cpu.reg(exit.target_register));
+    }
+  }
 }
