@@ -1,5 +1,7 @@
 #include "Memory.hpp"
 
+#include <cstring>
+
 using namespace vm;
 
 Memory::Memory(size_t size) : size_(size) {
