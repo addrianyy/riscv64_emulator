@@ -52,6 +52,26 @@ static void flush_instruction_cache(void* memory, size_t size) {
   __builtin___clear_cache(memory, reinterpret_cast<uint8_t*>(memory) + size);
 }
 
+#elif defined(PLATFORM_WINDOWS)
+
+#include <Windows.h>
+
+static void* allocate_executable_memory(size_t size) {
+  return VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+}
+
+static void free_executable_memory(void* p, size_t size) {
+  VirtualFree(p, 0, MEM_RELEASE);
+}
+
+static void unprotect_executable_memory() {}
+
+static void protect_executable_memory() {}
+
+static void flush_instruction_cache(void* memory, size_t size) {
+  FlushInstructionCache(GetCurrentProcess(), memory, size);
+}
+
 #else
 #error "Unsupported platform"
 #endif

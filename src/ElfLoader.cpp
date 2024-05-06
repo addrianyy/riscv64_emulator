@@ -40,7 +40,8 @@ ElfLoader::Image ElfLoader::load(const std::string& file_path, vm::Memory& memor
 ElfLoader::Image ElfLoader::load(std::span<const uint8_t> binary, vm::Memory& memory) {
   BinaryFileView elf(binary);
 
-  verify(elf.read32(0x00) == 'FLE\x7F', "image has invalid ELF magic");
+  // 7F ELF
+  verify(elf.read32(0x00) == 0x464c457f, "image has invalid ELF magic");
   verify(elf.read8(0x04) == 2, "image is not 64 bit");
   verify(elf.read8(0x05) == 1, "image is not little endian");
   verify(elf.read16(0x10) == 2, "image is not executable file");
