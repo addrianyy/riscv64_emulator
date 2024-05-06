@@ -49,8 +49,7 @@ static void unprotect_executable_memory() {}
 static void protect_executable_memory() {}
 
 static void flush_instruction_cache(void* memory, size_t size) {
-  (void)memory;
-  (void)size;
+  __builtin___clear_cache(memory, reinterpret_cast<uint8_t*>(memory + size));
 }
 
 #else
