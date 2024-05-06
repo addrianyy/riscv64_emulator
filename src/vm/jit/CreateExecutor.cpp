@@ -3,7 +3,7 @@
 using namespace vm;
 using namespace vm::jit;
 
-#if defined(__aarch64__) || defined(_M_ARM64)
+#ifdef VM_JIT_AARCH64
 
 #include "aarch64/Executor.hpp"
 
