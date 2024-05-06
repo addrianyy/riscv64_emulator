@@ -25,9 +25,11 @@ int main(int argc, const char* argv[]) {
   const auto image = ElfLoader::load(elf_path, vm.memory());
   log_info("loaded elf at {:x} with size {:x}", image.base, image.size);
 
+  vm.memory().set_permissions(0x10, image.base, vm::MemoryFlags::Read | vm::MemoryFlags::Write);
+
   {
     const auto max_executable_address = image.base + image.size;
-    vm.use_jit(std::make_shared<vm::jit::CodeBuffer>(vm::jit::CodeBuffer::Type::Singlethreaded,
+    vm.use_jit(std::make_shared<vm::jit::CodeBuffer>(vm::jit::CodeBuffer::Flags::None,
                                                      16 * 1024 * 1024, max_executable_address));
   }
 

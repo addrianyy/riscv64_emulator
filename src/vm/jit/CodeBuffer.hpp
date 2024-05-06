@@ -5,21 +5,24 @@
 #include <mutex>
 #include <span>
 
+#include <base/EnumBitOperations.hpp>
+
 #include "ExecutableBuffer.hpp"
 
 namespace vm::jit {
 
 class CodeBuffer {
  public:
-  enum class Type {
-    Singlethreaded,
-    Multithreaded,
+  enum class Flags {
+    None = 0,
+    Multithreaded = (1 << 0),
+    SkipPermissionChecks = (1 << 1),
   };
 
  private:
   constexpr static size_t block_size = 4;
 
-  Type type_;
+  Flags flags_;
 
   std::unique_ptr<std::atomic_uint32_t[]> block_to_offset;
   size_t max_blocks{};
@@ -32,13 +35,13 @@ class CodeBuffer {
   uint32_t allocate_executable_memory(std::span<const uint8_t> code);
 
  public:
-  CodeBuffer(Type type, size_t size, size_t max_executable_guest_address);
+  CodeBuffer(Flags flags, size_t size, size_t max_executable_guest_address);
 
   void* get(uint64_t guest_address) const;
   void* insert(uint64_t guest_address, std::span<const uint8_t> code);
   void* insert_standalone(std::span<const uint8_t> code);
 
-  Type type() const { return type_; }
+  Flags flags() const { return flags_; }
   size_t max_block_count() const { return max_blocks; }
   const std::atomic_uint32_t* block_translation_table() const { return block_to_offset.get(); }
 
@@ -46,3 +49,5 @@ class CodeBuffer {
 };
 
 }  // namespace vm::jit
+
+IMPLEMENT_ENUM_BIT_OPERATIONS(vm::jit::CodeBuffer::Flags)

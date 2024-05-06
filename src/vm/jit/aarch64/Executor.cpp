@@ -58,6 +58,7 @@ jit::ExitReason Executor::run(Memory& memory, Cpu& cpu) {
     TrampolineBlock trampoline_block{
       .register_state = uint64_t(cpu.register_state().raw_table()),
       .memory_base = uint64_t(memory.contents()),
+      .permissions_base = uint64_t(memory.permissions()),
       .memory_size = memory.size(),
       .block_base = uint64_t(code_buffer->block_translation_table()),
       .max_executable_pc = code_buffer->max_block_count() * 4,

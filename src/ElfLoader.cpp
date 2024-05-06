@@ -74,9 +74,6 @@ ElfLoader::Image ElfLoader::load(std::span<const uint8_t> binary, vm::Memory& me
     const auto file_size = ph.read64(0x20);
     const auto memory_size = ph.read64(0x28);
 
-    // As there is no paging at this point we don't care about flags.
-    (void)flags;
-
     if (base_address == 0) {
       base_address = memory_address;
 
@@ -89,13 +86,27 @@ ElfLoader::Image ElfLoader::load(std::span<const uint8_t> binary, vm::Memory& me
     const auto segment_data_size = std::min(file_size, memory_size);
     const auto segment_data = elf.slice(file_offset, segment_data_size);
 
-    if (segment_data_size == 0) {
-      continue;
+    if (segment_data_size > 0) {
+      const auto write_success =
+        memory.write(memory_address, segment_data.raw(), segment_data_size);
+      verify(write_success, "writing segment {:x} (size {:x}) failed", memory_address,
+             segment_data_size);
     }
 
-    const auto write_success = memory.write(memory_address, segment_data.raw(), segment_data_size);
-    verify(write_success, "writing segment {:x} (size {:x} failed)", memory_address,
-           segment_data_size);
+    if (memory_size > 0) {
+      auto permissions = vm::MemoryFlags::Read;
+      if (flags & 1) {
+        permissions = permissions | vm::MemoryFlags::Execute;
+      }
+      if (flags & 2) {
+        permissions = permissions | vm::MemoryFlags::Write;
+      }
+
+      const auto permissions_success =
+        memory.set_permissions(memory_address, memory_size, permissions);
+      verify(permissions_success, "setting segment's permissions {:x} (size {:x}) failed",
+             memory_address, memory_size);
+    }
   }
 
   const auto size = end_address - base_address;

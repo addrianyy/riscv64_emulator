@@ -10,6 +10,7 @@ namespace vm::jit::aarch64 {
 struct TrampolineBlock {
   uint64_t register_state;
   uint64_t memory_base;
+  uint64_t permissions_base;
   uint64_t memory_size;
   uint64_t block_base;
   uint64_t max_executable_pc;

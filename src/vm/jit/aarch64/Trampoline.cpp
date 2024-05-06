@@ -95,9 +95,9 @@ void* aarch64::generate_trampoline(CodegenContext& context, CodeBuffer& code_buf
   RegisterSaver register_saver{as};
 
   register_saver
-    .add(RA::register_state, RA::memory_base, RA::memory_size, RA::block_base,
+    .add(RA::register_state, RA::memory_base, RA::permissions_base, RA::memory_size, RA::block_base,
          RA::max_executable_pc, RA::code_base, RA::base_pc)
-    .add(RA::a_reg, RA::b_reg)
+    .add(RA::a_reg, RA::b_reg, RA::c_reg)
     .add(RA::exit_reason, RA::exit_pc)
     .add_always(RA::trampoline_block);
 
@@ -114,6 +114,7 @@ void* aarch64::generate_trampoline(CodegenContext& context, CodeBuffer& code_buf
 
     as.ldr(RA::register_state, tb, offsetof(TrampolineBlock, register_state));
     as.ldr(RA::memory_base, tb, offsetof(TrampolineBlock, memory_base));
+    as.ldr(RA::permissions_base, tb, offsetof(TrampolineBlock, permissions_base));
     as.ldr(RA::memory_size, tb, offsetof(TrampolineBlock, memory_size));
     as.ldr(RA::block_base, tb, offsetof(TrampolineBlock, block_base));
     as.ldr(RA::max_executable_pc, tb, offsetof(TrampolineBlock, max_executable_pc));

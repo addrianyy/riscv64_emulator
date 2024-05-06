@@ -3,8 +3,12 @@
 
 #include <vm/Instruction.hpp>
 
+#include "base/Log.hpp"
+
 using namespace vm;
 using namespace vm::jit::aarch64;
+
+using CodeBufferFlags = jit::CodeBuffer::Flags;
 
 struct CodeGenerator {
   a64::Assembler& as;
@@ -69,13 +73,13 @@ struct CodeGenerator {
 
   void generate_exit(ArchExitReason reason) { generate_exit(reason, current_pc); }
   void generate_exit(ArchExitReason reason, uint64_t pc) {
-    register_cache.flush_registers(register_cache.take_state_snapshot());
+    register_cache.flush_current_registers();
     load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     load_immediate_u(RegisterAllocation::exit_pc, pc);
     as.ret();
   }
   void generate_exit(ArchExitReason reason, A64R pc) {
-    register_cache.flush_registers(register_cache.take_state_snapshot());
+    register_cache.flush_current_registers();
     load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     as.mov(RegisterAllocation::exit_pc, pc);
     as.ret();
@@ -108,18 +112,56 @@ struct CodeGenerator {
 
       register_cache.flush_registers(pending_exit.snapshot);
 
+      load_immediate_u(RegisterAllocation::exit_reason, uint64_t(pending_exit.reason));
+
       if (pending_exit.pc_register != A64R::Xzr) {
-        generate_exit(pending_exit.reason, pending_exit.pc_register);
+        as.mov(RegisterAllocation::exit_pc, pending_exit.pc_register);
       } else {
-        generate_exit(pending_exit.reason, pending_exit.pc_value);
+        load_immediate_u(RegisterAllocation::exit_pc, pending_exit.pc_value);
       }
+
+      as.ret();
     }
   }
 
-  void generate_memory_translate(A64R address_reg,
-                                 A64R translated_reg,
-                                 uint64_t access_size_log2,
-                                 bool write) {
+  bool load_memory_permission_mask(A64R target, MemoryFlags flags, size_t access_size_log2) {
+    const auto uflags = uint64_t(flags);
+
+    switch (access_size_log2) {
+      case 0: {
+        as.mov(target, uflags);
+        break;
+      }
+
+      case 1: {
+        as.mov(target, (uflags << 8) | uflags);
+        break;
+      }
+
+      case 2:
+      case 3: {
+        uint64_t mask = 0;
+        for (size_t i = 0; i < 8; ++i) {
+          mask |= uflags << (i * 8);
+        }
+        as.mov(target, mask);
+
+        // Truncate to 32 bit registers when access size == 4.
+        return access_size_log2 == 2;
+      }
+
+      default:
+        unreachable();
+    }
+
+    return false;
+  }
+
+  void generate_validate_memory_access(A64R address_reg,
+                                       A64R scratch_reg,
+                                       A64R scratch_reg2,
+                                       uint64_t access_size_log2,
+                                       bool write) {
     const auto fault_label = as.allocate_label();
 
     // Make sure that address is aligned otherwise the bound check later won't be accurate.
@@ -133,8 +175,40 @@ struct CodeGenerator {
     as.cmp(address_reg, RegisterAllocation::memory_size);
     as.b(a64::Condition::UnsignedGreaterEqual, fault_label);
 
-    // Calculate real memory address.
-    as.add(translated_reg, RegisterAllocation::memory_base, address_reg);
+    if ((code_buffer.flags() & CodeBufferFlags::SkipPermissionChecks) == CodeBufferFlags::None) {
+      auto perms_reg = scratch_reg;
+      auto mask_reg = scratch_reg2;
+
+      const auto pb = RegisterAllocation::permissions_base;
+
+      switch (access_size_log2) {
+          // clang-format off
+        case 0: as.ldrb(perms_reg, pb, address_reg); break;
+        case 1: as.ldrh(perms_reg, pb, address_reg); break;
+        case 2: as.ldr(cast_to_32bit(perms_reg), pb, address_reg); break;
+        case 3: as.ldr(perms_reg, pb, address_reg); break;
+          // clang-format on
+
+        default:
+          unreachable();
+      }
+
+      const auto truncate_to_32bit = load_memory_permission_mask(
+        mask_reg, write ? MemoryFlags::Write : MemoryFlags::Read, access_size_log2);
+
+      if (truncate_to_32bit) {
+        perms_reg = cast_to_32bit(perms_reg);
+        mask_reg = cast_to_32bit(mask_reg);
+      }
+
+      if (current_pc == 0x23704) {
+        as.brk(1);
+      }
+
+      as.and_(perms_reg, perms_reg, mask_reg);
+      as.cmp(perms_reg, mask_reg);
+      as.b(a64::Condition::NotEqual, fault_label);
+    }
 
     add_pending_exit(fault_label,
                      write ? ArchExitReason::MemoryWriteFault : ArchExitReason::MemoryReadFault,
@@ -143,11 +217,11 @@ struct CodeGenerator {
 
   a64::Label generate_validated_branch(A64R block_offset_reg) {
     // Load the 32 bit code offset from block translation table.
-    if (code_buffer.type() == jit::CodeBuffer::Type::Multithreaded) {
+    if ((code_buffer.flags() & CodeBufferFlags::Multithreaded) == CodeBufferFlags::None) {
+      as.ldr(cast_to_32bit(block_offset_reg), RegisterAllocation::block_base, block_offset_reg);
+    } else {
       as.add(block_offset_reg, RegisterAllocation::block_base, block_offset_reg);
       as.ldar(cast_to_32bit(block_offset_reg), block_offset_reg);
-    } else {
-      as.ldr(cast_to_32bit(block_offset_reg), RegisterAllocation::block_base, block_offset_reg);
     }
 
     const auto code_offset_reg = block_offset_reg;
@@ -157,7 +231,6 @@ struct CodeGenerator {
     as.cbz(code_offset_reg, no_block_label);
 
     // Jump to the block.
-    register_cache.flush_registers(register_cache.take_state_snapshot());
     as.add(code_offset_reg, RegisterAllocation::code_base, code_offset_reg);
     as.br(code_offset_reg);
 
@@ -183,6 +256,8 @@ struct CodeGenerator {
       // Calculate the memory offset from `block_base`.
       load_immediate_u(scratch_reg, block * 4);
 
+      register_cache.flush_current_registers();
+
       const auto exit_label = generate_validated_branch(scratch_reg);
       add_pending_exit(exit_label, ArchExitReason::BlockNotGenerated, false, target_pc);
     }
@@ -194,8 +269,10 @@ struct CodeGenerator {
     const auto oob_label = as.allocate_label();
     const auto unaligned_label = as.allocate_label();
 
-    // Mask off last bit as is required by the architecture.
+    // Mask off last bit as it is required by the architecture.
     as.and_(scratch_reg, target_pc, ~uint64_t(1));
+
+    register_cache.flush_current_registers();
 
     // Exit the VM if the address is not properly aligned.
     as.tst(scratch_reg, 0b11);
@@ -214,8 +291,8 @@ struct CodeGenerator {
       add_pending_exit(exit_label, ArchExitReason::BlockNotGenerated, false, target_pc);
     }
 
-    add_pending_exit(oob_label, ArchExitReason::OutOfBoundsPc, true, target_pc);
-    add_pending_exit(unaligned_label, ArchExitReason::UnalignedPc, true, target_pc);
+    add_pending_exit(oob_label, ArchExitReason::OutOfBoundsPc, false, target_pc);
+    add_pending_exit(unaligned_label, ArchExitReason::UnalignedPc, false, target_pc);
   }
 
   bool generate_instruction(const Instruction& instruction) {
@@ -230,6 +307,7 @@ struct CodeGenerator {
           load_immediate(reg, instruction.imm());
           register_cache.unlock_register_dirty(reg);
         }
+        break;
       }
 
       case IT::Auipc: {
@@ -326,32 +404,34 @@ struct CodeGenerator {
       case IT::Lhu:
       case IT::Lwu: {
         if (instruction.rd() != Register::Zero) {
-          const auto [address_reg, dest_reg] =
+          const auto [unoffseted_address_reg, dest_reg] =
             register_cache.lock_registers(instruction.rs1(), instruction.rd());
 
-          const auto offseted_reg =
-            add_offset_to_register(address_reg, RegisterAllocation::a_reg, instruction.imm());
-          const auto translated_reg = RegisterAllocation::a_reg;
+          const auto address_reg = add_offset_to_register(
+            unoffseted_address_reg, RegisterAllocation::a_reg, instruction.imm());
 
-          generate_memory_translate(offseted_reg, translated_reg,
-                                    utils::memory_access_size_log2(instruction_type), false);
+          generate_validate_memory_access(address_reg, RegisterAllocation::b_reg,
+                                          RegisterAllocation::c_reg,
+                                          utils::memory_access_size_log2(instruction_type), false);
+
+          const auto mb = RegisterAllocation::memory_base;
 
           switch (instruction_type) {
               // clang-format off
-            case IT::Lb:  as.ldrsb(dest_reg, translated_reg, 0); break;
-            case IT::Lh:  as.ldrsh(dest_reg, translated_reg, 0); break;
-            case IT::Lw:  as.ldrsw(dest_reg, translated_reg, 0); break;
-            case IT::Ld:  as.ldr(dest_reg, translated_reg, 0); break;
-            case IT::Lbu: as.ldrb(dest_reg, translated_reg, 0); break;
-            case IT::Lhu: as.ldrh(dest_reg, translated_reg, 0); break;
-            case IT::Lwu: as.ldr(cast_to_32bit(dest_reg), translated_reg, 0); break;
+            case IT::Lb:  as.ldrsb(dest_reg, mb, address_reg); break;
+            case IT::Lh:  as.ldrsh(dest_reg, mb, address_reg); break;
+            case IT::Lw:  as.ldrsw(dest_reg, mb, address_reg); break;
+            case IT::Ld:  as.ldr(dest_reg, mb, address_reg); break;
+            case IT::Lbu: as.ldrb(dest_reg, mb, address_reg); break;
+            case IT::Lhu: as.ldrh(dest_reg, mb, address_reg); break;
+            case IT::Lwu: as.ldr(cast_to_32bit(dest_reg), mb, address_reg); break;
               // clang-format on
 
             default:
               unreachable();
           }
 
-          register_cache.unlock_register(address_reg);
+          register_cache.unlock_register(unoffseted_address_reg);
           register_cache.unlock_register_dirty(dest_reg);
         }
 
@@ -362,29 +442,31 @@ struct CodeGenerator {
       case IT::Sh:
       case IT::Sw:
       case IT::Sd: {
-        const auto [address_reg, value_reg] =
+        const auto [unoffseted_address_reg, value_reg] =
           register_cache.lock_registers(instruction.rs1(), instruction.rs2());
 
-        const auto offseted_reg =
-          add_offset_to_register(address_reg, RegisterAllocation::a_reg, instruction.imm());
-        const auto translated_reg = RegisterAllocation::a_reg;
+        const auto address_reg = add_offset_to_register(
+          unoffseted_address_reg, RegisterAllocation::a_reg, instruction.imm());
 
-        generate_memory_translate(offseted_reg, translated_reg,
-                                  utils::memory_access_size_log2(instruction_type), true);
+        generate_validate_memory_access(address_reg, RegisterAllocation::b_reg,
+                                        RegisterAllocation::c_reg,
+                                        utils::memory_access_size_log2(instruction_type), true);
+
+        const auto mb = RegisterAllocation::memory_base;
 
         switch (instruction_type) {
             // clang-format off
-          case IT::Sb: as.strb(value_reg, translated_reg, 0); break;
-          case IT::Sh: as.strh(value_reg, translated_reg, 0); break;
-          case IT::Sw: as.str(cast_to_32bit(value_reg), translated_reg, 0); break;
-          case IT::Sd: as.str(value_reg, translated_reg, 0); break;
+          case IT::Sb: as.strb(value_reg, mb, address_reg); break;
+          case IT::Sh: as.strh(value_reg, mb, address_reg); break;
+          case IT::Sw: as.str(cast_to_32bit(value_reg), mb, address_reg); break;
+          case IT::Sd: as.str(value_reg, mb, address_reg); break;
             // clang-format on
 
           default:
             unreachable();
         }
 
-        register_cache.unlock_registers(address_reg, value_reg);
+        register_cache.unlock_registers(unoffseted_address_reg, value_reg);
 
         break;
       }
@@ -690,7 +772,7 @@ struct CodeGenerator {
 
     while (true) {
       uint32_t instruction_encoded;
-      if (!memory.read(current_pc, instruction_encoded)) {
+      if (!memory.read(current_pc, MemoryFlags::Execute, instruction_encoded)) {
         generate_exit(ArchExitReason::InstructionFetchFault);
         break;
       }

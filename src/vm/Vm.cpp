@@ -17,7 +17,7 @@ Vm::~Vm() = default;
 void Vm::use_jit(std::shared_ptr<jit::CodeBuffer> code_buffer) {
   std::unique_ptr<jit::CodeDump> code_dump;
   if (true) {
-    code_dump = std::make_unique<jit::CodeDump>("jit_dump.asm");
+    code_dump = std::make_unique<jit::CodeDump>("jit_dump.bin");
   }
 
   jit_executor = jit::create_arch_specific_executor(std::move(code_buffer), std::move(code_dump));

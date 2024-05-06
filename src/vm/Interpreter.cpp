@@ -17,7 +17,7 @@ bool Interpreter::step(Memory& memory, Cpu& cpu, Exit& exit) {
   }
 
   uint32_t encoded_instruction;
-  if (!memory.read<uint32_t>(current_pc, encoded_instruction)) {
+  if (!memory.read<uint32_t>(current_pc, MemoryFlags::Execute, encoded_instruction)) {
     exit.reason = Exit::Reason::InstructionFetchFault;
     return false;
   }
@@ -103,12 +103,12 @@ bool Interpreter::step(Memory& memory, Cpu& cpu, Exit& exit) {
       bool success = false;
       uint64_t result = 0;
 
-#define CASE(instruction, type)              \
-  case IT::instruction: {                    \
-    type v{};                                \
-    success = memory.read<type>(address, v); \
-    result = uint64_t(v);                    \
-    break;                                   \
+#define CASE(instruction, type)                                 \
+  case IT::instruction: {                                       \
+    type v{};                                                   \
+    success = memory.read<type>(address, MemoryFlags::Read, v); \
+    result = uint64_t(v);                                       \
+    break;                                                      \
   }
 
       switch (instruction_type) {
@@ -148,10 +148,10 @@ bool Interpreter::step(Memory& memory, Cpu& cpu, Exit& exit) {
 
       bool success = false;
 
-#define CASE(instruction, type)                   \
-  case IT::instruction: {                         \
-    success = memory.write<type>(address, value); \
-    break;                                        \
+#define CASE(instruction, type)                                       \
+  case IT::instruction: {                                             \
+    success = memory.write<type>(address, MemoryFlags::Write, value); \
+    break;                                                            \
   }
 
       switch (instruction_type) {

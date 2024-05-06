@@ -75,6 +75,7 @@ class RegisterCache {
 
   StateSnapshot take_state_snapshot() const;
   void flush_registers(const StateSnapshot& snapshot);
+  void flush_current_registers() { flush_registers(take_state_snapshot()); }
 
   void finish_instruction();
 };
