@@ -1,6 +1,7 @@
 #include "ElfLoader.hpp"
 
 #include <base/Error.hpp>
+#include <base/Initialization.hpp>
 #include <base/Log.hpp>
 #include <base/Print.hpp>
 #include <base/time/Stopwatch.hpp>
@@ -9,6 +10,8 @@
 #include <vm/Vm.hpp>
 
 int main(int argc, const char* argv[]) {
+  base::initialize();
+
   if (argc != 2) {
     log_info("usage: riscv64_emulator [elf image path]");
     return 1;

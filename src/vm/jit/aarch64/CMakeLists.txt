@@ -1,3 +1,5 @@
+target_link_libraries(riscv64_emulator PRIVATE asmlib_a64)
+
 target_sources(riscv64_emulator PRIVATE
     Registers.cpp
     Registers.cpp
