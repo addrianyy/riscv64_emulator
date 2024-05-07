@@ -7,6 +7,8 @@
 using namespace vm::jit;
 using namespace vm::jit::aarch64;
 
+using namespace asmlib;
+
 class RegisterSaver {
   // Return address.
   constexpr static auto filler_reg = A64R::X30;

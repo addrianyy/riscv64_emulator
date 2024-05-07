@@ -134,7 +134,7 @@ void RegisterCache::lock_registers_internal(std::span<const RegisterToLock> regi
   }
 }
 
-RegisterCache::RegisterCache(a64::Assembler& as) : as(as) {
+RegisterCache::RegisterCache(asmlib::a64::Assembler& as) : as(as) {
   for (auto& slot : register_to_slot) {
     slot = invalid_id;
   }

@@ -8,10 +8,10 @@
 namespace vm::jit::aarch64 {
 
 struct CodegenContext {
-  a64::Assembler assembler;
+  asmlib::a64::Assembler assembler;
 
   struct Exit {
-    a64::Label label;
+    asmlib::a64::Label label;
     ArchExitReason reason{};
     A64R pc_register{A64R::Xzr};
     uint64_t pc_value{};

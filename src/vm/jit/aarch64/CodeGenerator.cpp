@@ -6,6 +6,8 @@
 using namespace vm;
 using namespace vm::jit::aarch64;
 
+using namespace asmlib;
+
 using CodeBufferFlags = jit::CodeBuffer::Flags;
 
 struct CodeGenerator {

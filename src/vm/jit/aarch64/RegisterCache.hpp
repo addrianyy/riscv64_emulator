@@ -36,7 +36,7 @@ class RegisterCache {
     RegisterToLock(Register r) : reg(r), write_only(false) {}
   };
 
-  a64::Assembler& as;
+  asmlib::a64::Assembler& as;
   uint32_t program_counter = 0;
 
   struct Slot {
@@ -62,7 +62,7 @@ class RegisterCache {
   void lock_registers_internal(std::span<const RegisterToLock> registers, std::span<A64R> output);
 
  public:
-  explicit RegisterCache(a64::Assembler& as);
+  explicit RegisterCache(asmlib::a64::Assembler& as);
 
   template <typename T>
   A64R lock_register(T reg) {

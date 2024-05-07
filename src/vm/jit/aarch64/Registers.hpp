@@ -5,7 +5,7 @@
 
 namespace vm::jit::aarch64 {
 
-using A64R = a64::Register;
+using A64R = asmlib::a64::Register;
 
 class RegisterAllocation {
  public:
