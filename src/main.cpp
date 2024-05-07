@@ -29,8 +29,12 @@ int main(int argc, const char* argv[]) {
 
   {
     const auto max_executable_address = image.base + image.size;
-    vm.use_jit(std::make_shared<vm::jit::CodeBuffer>(vm::jit::CodeBuffer::Flags::None,
-                                                     16 * 1024 * 1024, max_executable_address));
+
+    auto code_buffer = std::make_shared<vm::jit::CodeBuffer>(
+      vm::jit::CodeBuffer::Flags::None, 16 * 1024 * 1024, max_executable_address);
+    code_buffer->dump_code_to_file("jit_dump.bin");
+
+    vm.use_jit(std::move(code_buffer));
   }
 
   vm::Cpu cpu;

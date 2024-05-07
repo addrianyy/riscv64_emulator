@@ -1,7 +1,7 @@
 #include "CodeGenerator.hpp"
-#include "Utilities.hpp"
 
 #include <vm/Instruction.hpp>
+#include <vm/jit/Utilities.hpp>
 
 using namespace vm;
 using namespace vm::jit::aarch64;
@@ -411,9 +411,9 @@ struct CodeGenerator {
           const auto address_reg = add_offset_to_register(
             unoffseted_address_reg, RegisterAllocation::a_reg, instruction.imm());
 
-          generate_validate_memory_access(address_reg, RegisterAllocation::b_reg,
-                                          RegisterAllocation::c_reg,
-                                          utils::memory_access_size_log2(instruction_type), false);
+          generate_validate_memory_access(
+            address_reg, RegisterAllocation::b_reg, RegisterAllocation::c_reg,
+            jit::utils::memory_access_size_log2(instruction_type), false);
 
           const auto mb = RegisterAllocation::memory_base;
 
@@ -449,9 +449,9 @@ struct CodeGenerator {
         const auto address_reg = add_offset_to_register(
           unoffseted_address_reg, RegisterAllocation::a_reg, instruction.imm());
 
-        generate_validate_memory_access(address_reg, RegisterAllocation::b_reg,
-                                        RegisterAllocation::c_reg,
-                                        utils::memory_access_size_log2(instruction_type), true);
+        generate_validate_memory_access(
+          address_reg, RegisterAllocation::b_reg, RegisterAllocation::c_reg,
+          jit::utils::memory_access_size_log2(instruction_type), true);
 
         const auto mb = RegisterAllocation::memory_base;
 

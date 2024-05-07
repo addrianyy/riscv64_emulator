@@ -1,3 +1,6 @@
 [submodule "deps/asmlib_a64"]
 	path = deps/asmlib_a64
 	url = https://github.com/addrianyy/asmlib_a64
+[submodule "deps/asmlib_x64"]
+	path = deps/asmlib_x64
+	url = https://github.com/addrianyy/asmlib_x64.git

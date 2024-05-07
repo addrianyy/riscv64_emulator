@@ -1,17 +1,17 @@
 #include "Executor.hpp"
 #include "CodeGenerator.hpp"
+#include "Exit.hpp"
 #include "Trampoline.hpp"
 
 #include <base/Error.hpp>
 #include <base/Log.hpp>
 
-#include <vm/jit/Utilities.hpp>
 #include <vm/private/ExecutionLog.hpp>
 
 using namespace vm;
-using namespace vm::jit::aarch64;
+using namespace vm::jit::x64;
 
-void* Executor::generate_code(const Memory& memory, uint64_t pc) {
+void* Executor::generate_code(const vm::Memory& memory, uint64_t pc) {
 #ifdef PRINT_EXECUTION_LOG
   const bool single_step = true;
 #else
@@ -20,17 +20,17 @@ void* Executor::generate_code(const Memory& memory, uint64_t pc) {
 
   const auto instructions =
     generate_block_code(codegen_context, *code_buffer, memory, single_step, pc);
-  const auto instruction_bytes = utils::cast_to_bytes(instructions);
 
 #ifdef JIT_LOG_GENERATED_BLOCKS
-  log_debug("generated code for {:x}: {} instructions...", pc, instructions.size());
+  log_debug("generated code for {:x}: {} bytes...", pc, instructions.size());
 #endif
 
-  return code_buffer->insert(pc, instruction_bytes);
+  return code_buffer->insert(pc, instructions);
 }
 
-Executor::Executor(std::shared_ptr<CodeBuffer> code_buffer) : code_buffer(std::move(code_buffer)) {
-  trampoline_fn = generate_trampoline(codegen_context, *this->code_buffer);
+Executor::Executor(std::shared_ptr<CodeBuffer> code_buffer, const Abi& abi)
+    : code_buffer(std::move(code_buffer)) {
+  trampoline_fn = generate_trampoline(codegen_context, *this->code_buffer, abi);
 }
 
 jit::ExitReason Executor::run(Memory& memory, Cpu& cpu) {
@@ -53,9 +53,7 @@ jit::ExitReason Executor::run(Memory& memory, Cpu& cpu) {
       .register_state = uint64_t(cpu.register_state().raw_table()),
       .memory_base = uint64_t(memory.contents()),
       .permissions_base = uint64_t(memory.permissions()),
-      .memory_size = memory.size(),
       .block_base = uint64_t(code_buffer->block_translation_table()),
-      .max_executable_pc = code_buffer->max_block_count() * 4,
       .code_base = uint64_t(code_buffer->code_buffer_base()),
       .entrypoint = uint64_t(code),
     };

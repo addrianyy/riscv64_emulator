@@ -1,8 +1,19 @@
 #include "CodeBuffer.hpp"
+#include "CodeDump.hpp"
 
 #include <base/Error.hpp>
 
 using namespace vm::jit;
+
+static CodeDump::Architecture code_dump_architecture() {
+#if defined(VM_JIT_X64)
+  return CodeDump::Architecture::X64;
+#elif defined(VM_JIT_AARCH64)
+  return CodeDump::Architecture::AArch64;
+#else
+  fatal_error("cannot enable jit dumping to file: unknown code architecture")
+#endif
+}
 
 uint32_t CodeBuffer::allocate_executable_memory(std::span<const uint8_t> code) {
   constexpr auto code_alignment = uint64_t(16);
@@ -22,6 +33,13 @@ CodeBuffer::CodeBuffer(Flags flags, size_t size, size_t max_executable_guest_add
     : flags_(flags), executable_buffer(size), next_free_offset(16) {
   max_blocks = (max_executable_guest_address + block_size - 1) / block_size;
   block_to_offset = std::make_unique<std::atomic_uint32_t[]>(max_blocks);
+}
+CodeBuffer::~CodeBuffer() = default;
+
+void CodeBuffer::dump_code_to_file(const std::string& path) {
+  std::unique_lock lock(mutex);
+  verify(!code_dump, "JIT code buffer has dumping to file already enabled");
+  code_dump = std::make_unique<CodeDump>(path, code_dump_architecture());
 }
 
 void* CodeBuffer::get(uint64_t guest_address) const {
@@ -49,6 +67,10 @@ void* CodeBuffer::insert(uint64_t guest_address, std::span<const uint8_t> code) 
 
   const auto block = guest_address / block_size;
   block_to_offset[block].store(offset, std::memory_order::release);
+
+  if (code_dump) {
+    code_dump->write(guest_address, code);
+  }
 
   return allocation;
 }

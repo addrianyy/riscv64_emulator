@@ -2,12 +2,7 @@
 
 #include <base/Error.hpp>
 
-using namespace vm::jit::aarch64;
-
-std::span<const uint8_t> utils::cast_instructions_to_bytes(std::span<const uint32_t> instructions) {
-  return std::span{reinterpret_cast<const uint8_t*>(instructions.data()),
-                   instructions.size() * sizeof(uint32_t)};
-}
+using namespace vm::jit;
 
 uint64_t utils::memory_access_size_log2(InstructionType type) {
   using IT = InstructionType;

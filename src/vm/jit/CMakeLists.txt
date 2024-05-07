@@ -21,7 +21,9 @@ if (architecture_aarch64)
     target_compile_definitions(riscv64_emulator PRIVATE VM_JIT_AARCH64)
     message(STATUS "detected aarch64: JIT is enabled")
 elseif (architecture_x64)
-    message(STATUS "detected x64: JIT is not supported")
+    add_subdirectory(x64)
+    target_compile_definitions(riscv64_emulator PRIVATE VM_JIT_X64)
+    message(STATUS "detected x64: JIT is enabled")
 else ()
     message(STATUS "unknown architecture: JIT is not supported")
 endif()
@@ -39,4 +41,6 @@ target_sources(riscv64_emulator PRIVATE
     Exit.cpp
     CreateExecutor.cpp
     CreateExecutor.hpp
+    Utilities.cpp
+    Utilities.hpp
 )

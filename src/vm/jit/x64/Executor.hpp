@@ -6,9 +6,10 @@
 
 #include <memory>
 
+#include "Abi.hpp"
 #include "CodegenContext.hpp"
 
-namespace vm::jit::aarch64 {
+namespace vm::jit::x64 {
 
 class Executor : public jit::Executor {
   std::shared_ptr<CodeBuffer> code_buffer;
@@ -20,9 +21,9 @@ class Executor : public jit::Executor {
   void* generate_code(const Memory& memory, uint64_t pc);
 
  public:
-  explicit Executor(std::shared_ptr<CodeBuffer> code_buffer);
+  explicit Executor(std::shared_ptr<CodeBuffer> code_buffer, const Abi& abi);
 
   ExitReason run(Memory& memory, Cpu& cpu) override;
 };
 
-}  // namespace vm::jit::aarch64
+}  // namespace vm::jit::x64

@@ -7,8 +7,6 @@ target_sources(riscv64_emulator PRIVATE
     RegisterCache.hpp
     CodeGenerator.cpp
     CodeGenerator.hpp
-    Utilities.cpp
-    Utilities.hpp
     CodegenContext.cpp
     CodegenContext.hpp
     Exit.cpp

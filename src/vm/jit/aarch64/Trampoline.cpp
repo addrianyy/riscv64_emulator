@@ -1,5 +1,6 @@
 #include "Trampoline.hpp"
-#include "Utilities.hpp"
+
+#include <vm/jit/Utilities.hpp>
 
 #include <ranges>
 #include <unordered_set>
@@ -132,6 +133,5 @@ void* aarch64::generate_trampoline(CodegenContext& context, CodeBuffer& code_buf
     as.ret();
   }
 
-  return code_buffer.insert_standalone(
-    utils::cast_instructions_to_bytes(as.assembled_instructions()));
+  return code_buffer.insert_standalone(utils::cast_to_bytes(as.assembled_instructions()));
 }
