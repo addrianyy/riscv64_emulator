@@ -74,14 +74,14 @@ struct CodeGenerator {
   void generate_exit(ArchExitReason reason) { generate_exit(reason, current_pc); }
   void generate_exit(ArchExitReason reason, uint64_t pc) {
     register_cache.flush_current_registers();
-    load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     load_immediate_u(RegisterAllocation::exit_pc, pc);
+    load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     as.ret();
   }
   void generate_exit(ArchExitReason reason, A64R pc) {
     register_cache.flush_current_registers();
-    load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     as.mov(RegisterAllocation::exit_pc, pc);
+    load_immediate_u(RegisterAllocation::exit_reason, uint64_t(reason));
     as.ret();
   }
 
@@ -112,13 +112,13 @@ struct CodeGenerator {
 
       register_cache.flush_registers(pending_exit.snapshot);
 
-      load_immediate_u(RegisterAllocation::exit_reason, uint64_t(pending_exit.reason));
-
       if (pending_exit.pc_register != A64R::Xzr) {
         as.mov(RegisterAllocation::exit_pc, pending_exit.pc_register);
       } else {
         load_immediate_u(RegisterAllocation::exit_pc, pending_exit.pc_value);
       }
+
+      load_immediate_u(RegisterAllocation::exit_reason, uint64_t(pending_exit.reason));
 
       as.ret();
     }
@@ -199,10 +199,6 @@ struct CodeGenerator {
       if (truncate_to_32bit) {
         perms_reg = cast_to_32bit(perms_reg);
         mask_reg = cast_to_32bit(mask_reg);
-      }
-
-      if (current_pc == 0x23704) {
-        as.brk(1);
       }
 
       as.and_(perms_reg, perms_reg, mask_reg);
@@ -303,8 +299,8 @@ struct CodeGenerator {
 
     switch (instruction_type) {
       case IT::Lui: {
-        if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto reg = register_cache.lock_register(WO{rd});
+        if (instruction.rd() != Register::Zero) {
+          const auto reg = register_cache.lock_register(WO{instruction.rd()});
           load_immediate(reg, instruction.imm());
           register_cache.unlock_register_dirty(reg);
         }
@@ -312,8 +308,8 @@ struct CodeGenerator {
       }
 
       case IT::Auipc: {
-        if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto reg = register_cache.lock_register(WO{rd});
+        if (instruction.rd() != Register::Zero) {
+          const auto reg = register_cache.lock_register(WO{instruction.rd()});
           load_immediate_u(reg, current_pc + instruction.imm());
           register_cache.unlock_register_dirty(reg);
         }
@@ -321,8 +317,8 @@ struct CodeGenerator {
       }
 
       case InstructionType::Jal: {
-        if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto reg = register_cache.lock_register(WO{rd});
+        if (instruction.rd() != Register::Zero) {
+          const auto reg = register_cache.lock_register(WO{instruction.rd()});
           load_immediate_u(reg, current_pc + 4);
           register_cache.unlock_register_dirty(reg);
         }
@@ -338,8 +334,8 @@ struct CodeGenerator {
         auto offseted_reg =
           add_offset_to_register(target_reg, RegisterAllocation::a_reg, instruction.imm());
 
-        if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto dest_reg = register_cache.lock_register(WO{rd});
+        if (instruction.rd() != Register::Zero) {
+          const auto dest_reg = register_cache.lock_register(WO{instruction.rd()});
 
           if (dest_reg == offseted_reg) {
             as.mov(RegisterAllocation::a_reg, offseted_reg);
