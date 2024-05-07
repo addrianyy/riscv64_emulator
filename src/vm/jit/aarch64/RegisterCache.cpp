@@ -45,7 +45,9 @@ void RegisterCache::free_cache_slots(uint32_t count) {
 
     auto& slot = slots[slot_id];
 
-    emit_register_store(slot.reg, RegisterAllocation::cache[slot_id]);
+    if (slot.dirty) {
+      emit_register_store(slot.reg, RegisterAllocation::cache[slot_id]);
+    }
 
     register_to_slot[size_t(slot.reg)] = invalid_id;
     slot = Slot{};
@@ -54,22 +56,11 @@ void RegisterCache::free_cache_slots(uint32_t count) {
   }
 }
 
-void RegisterCache::reserve_register(Register reg) {
-  if (reg == Register::Zero) {
-    return;
-  }
-
-  if (const auto slot_id = register_to_slot[size_t(reg)]; slot_id != invalid_id) {
-    slots[slot_id].locked = true;
-  } else if (free_slots.empty()) {
-    free_cache_slots(1);
-  }
-}
-
-void RegisterCache::reserve_registers(std::span<const Register> registers) {
+void RegisterCache::reserve_registers(std::span<const RegisterToLock> registers) {
   uint64_t missing_registers_set = 0;
 
-  for (const auto reg : registers) {
+  for (const auto reg_to_lock : registers) {
+    const auto reg = reg_to_lock.reg;
     if (reg == Register::Zero) {
       continue;
     }
@@ -89,33 +80,58 @@ void RegisterCache::reserve_registers(std::span<const Register> registers) {
   }
 }
 
-A64R RegisterCache::lock_reserved_register(Register reg) {
-  if (reg == Register::Zero) {
-    return A64R::Xzr;
+void RegisterCache::lock_registers_internal(std::span<const RegisterToLock> registers,
+                                            std::span<A64R> output) {
+  reserve_registers(registers);
+
+  uint64_t read_registers_set = 0;
+
+  for (const auto reg_to_lock : registers) {
+    const auto reg = reg_to_lock.reg;
+    if (reg_to_lock.reg == Register::Zero || reg_to_lock.write_only) {
+      continue;
+    }
+
+    verify(uint32_t(reg) < 64, "register number too large");
+    read_registers_set |= uint64_t(1) << uint32_t(reg);
   }
 
-  if (const auto slot_id = register_to_slot[size_t(reg)]; slot_id != invalid_id) {
+  for (size_t i = 0; i < registers.size(); ++i) {
+    const auto reg_to_lock = registers[i];
+    const auto reg = reg_to_lock.reg;
+
+    if (reg == Register::Zero) {
+      output[i] = A64R::Xzr;
+      continue;
+    }
+
+    if (const auto slot_id = register_to_slot[size_t(reg)]; slot_id != invalid_id) {
+      auto& slot = slots[slot_id];
+      slot.locked = true;
+      slot.last_use = program_counter;
+
+      output[i] = RegisterAllocation::cache[slot_id];
+      continue;
+    }
+
+    const auto slot_id = acquire_cache_slot();
+
     auto& slot = slots[slot_id];
+    slot.reg = reg;
     slot.locked = true;
     slot.last_use = program_counter;
 
-    return RegisterAllocation::cache[slot_id];
+    register_to_slot[size_t(reg)] = slot_id;
+
+    const auto platform_register = RegisterAllocation::cache[slot_id];
+
+    // Emit load only if this register isn't write-only.
+    if (read_registers_set & (uint64_t(1) << uint64_t(reg))) {
+      emit_register_load(platform_register, reg);
+    }
+
+    output[i] = platform_register;
   }
-
-  const auto slot_id = acquire_cache_slot();
-
-  auto& slot = slots[slot_id];
-  slot.reg = reg;
-  slot.locked = true;
-  slot.last_use = program_counter;
-
-  register_to_slot[size_t(reg)] = slot_id;
-
-  const auto platform_register = RegisterAllocation::cache[slot_id];
-
-  emit_register_load(platform_register, reg);
-
-  return platform_register;
 }
 
 RegisterCache::RegisterCache(a64::Assembler& as) : as(as) {
@@ -135,11 +151,6 @@ RegisterCache::RegisterCache(a64::Assembler& as) : as(as) {
 
     free_slots.push_back(i);
   }
-}
-
-A64R RegisterCache::lock_register(Register reg) {
-  reserve_register(reg);
-  return lock_reserved_register(reg);
 }
 
 void RegisterCache::unlock_register(A64R reg, bool make_dirty) {

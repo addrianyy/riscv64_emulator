@@ -21,8 +21,20 @@ class RegisterCache {
     static_assert(Register::Zero == Register(uint8_t{}), "Register::Zero is not default value");
   };
 
+  struct WriteOnly {
+    Register reg{};
+  };
+
  private:
   constexpr static auto invalid_id = std::numeric_limits<uint16_t>::max();
+
+  struct RegisterToLock {
+    Register reg{};
+    bool write_only = false;
+
+    RegisterToLock(WriteOnly r) : reg(r.reg), write_only(true) {}
+    RegisterToLock(Register r) : reg(r), write_only(false) {}
+  };
 
   a64::Assembler& as;
   uint32_t program_counter = 0;
@@ -46,23 +58,26 @@ class RegisterCache {
   uint32_t acquire_cache_slot();
   void free_cache_slots(uint32_t count);
 
-  void reserve_register(Register reg);
-  void reserve_registers(std::span<const Register> registers);
-
-  A64R lock_reserved_register(Register reg);
+  void reserve_registers(std::span<const RegisterToLock> registers);
+  void lock_registers_internal(std::span<const RegisterToLock> registers, std::span<A64R> output);
 
  public:
   explicit RegisterCache(a64::Assembler& as);
 
-  A64R lock_register(Register reg);
+  template <typename T>
+  A64R lock_register(T reg) {
+    const auto [locked] = lock_registers(reg);
+    return locked;
+  }
 
   template <typename... Args>
   std::array<A64R, sizeof...(Args)> lock_registers(Args... args) {
-    const std::array<Register, sizeof...(Args)> all_registers{args...};
+    const std::array<RegisterToLock, sizeof...(Args)> registers_to_lock{args...};
 
-    reserve_registers(all_registers);
+    std::array<A64R, sizeof...(Args)> output{};
+    lock_registers_internal(registers_to_lock, output);
 
-    return std::array<A64R, sizeof...(Args)>{lock_reserved_register(args)...};
+    return output;
   }
 
   void unlock_register(A64R reg, bool make_dirty = false);

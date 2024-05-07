@@ -3,8 +3,6 @@
 
 #include <vm/Instruction.hpp>
 
-#include "base/Log.hpp"
-
 using namespace vm;
 using namespace vm::jit::aarch64;
 
@@ -299,11 +297,12 @@ struct CodeGenerator {
     const auto instruction_type = instruction.type();
 
     using IT = InstructionType;
+    using WO = RegisterCache::WriteOnly;
 
     switch (instruction_type) {
       case IT::Lui: {
         if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto reg = register_cache.lock_register(rd);
+          const auto reg = register_cache.lock_register(WO{rd});
           load_immediate(reg, instruction.imm());
           register_cache.unlock_register_dirty(reg);
         }
@@ -312,7 +311,7 @@ struct CodeGenerator {
 
       case IT::Auipc: {
         if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto reg = register_cache.lock_register(rd);
+          const auto reg = register_cache.lock_register(WO{rd});
           load_immediate_u(reg, current_pc + instruction.imm());
           register_cache.unlock_register_dirty(reg);
         }
@@ -321,7 +320,7 @@ struct CodeGenerator {
 
       case InstructionType::Jal: {
         if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto reg = register_cache.lock_register(rd);
+          const auto reg = register_cache.lock_register(WO{rd});
           load_immediate_u(reg, current_pc + 4);
           register_cache.unlock_register_dirty(reg);
         }
@@ -338,7 +337,7 @@ struct CodeGenerator {
           add_offset_to_register(target_reg, RegisterAllocation::a_reg, instruction.imm());
 
         if (const auto rd = instruction.rd(); rd != Register::Zero) {
-          const auto dest_reg = register_cache.lock_register(rd);
+          const auto dest_reg = register_cache.lock_register(WO{rd});
 
           if (dest_reg == offseted_reg) {
             as.mov(RegisterAllocation::a_reg, offseted_reg);
@@ -405,7 +404,7 @@ struct CodeGenerator {
       case IT::Lwu: {
         if (instruction.rd() != Register::Zero) {
           const auto [unoffseted_address_reg, dest_reg] =
-            register_cache.lock_registers(instruction.rs1(), instruction.rd());
+            register_cache.lock_registers(instruction.rs1(), WO{instruction.rd()});
 
           const auto address_reg = add_offset_to_register(
             unoffseted_address_reg, RegisterAllocation::a_reg, instruction.imm());
@@ -477,7 +476,8 @@ struct CodeGenerator {
       case IT::Andi:
       case IT::Addiw: {
         if (instruction.rd() != Register::Zero) {
-          const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
+          const auto [a, dest] =
+            register_cache.lock_registers(instruction.rs1(), WO{instruction.rd()});
           const auto imm = instruction.imm();
 
           bool succeeded = false;
@@ -546,7 +546,8 @@ struct CodeGenerator {
       case IT::Srliw:
       case IT::Sraiw: {
         if (instruction.rd() != Register::Zero) {
-          const auto [a, dest] = register_cache.lock_registers(instruction.rs1(), instruction.rd());
+          const auto [a, dest] =
+            register_cache.lock_registers(instruction.rs1(), WO{instruction.rd()});
 
           const auto a32 = cast_to_32bit(a);
           const auto dest32 = cast_to_32bit(dest);
@@ -577,8 +578,8 @@ struct CodeGenerator {
       case IT::Slt:
       case IT::Sltu: {
         if (instruction.rd() != Register::Zero) {
-          const auto [a, b, dest] =
-            register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+          const auto [a, b, dest] = register_cache.lock_registers(
+            instruction.rs1(), instruction.rs2(), WO{instruction.rd()});
 
           as.cmp(a, b);
           as.cset(dest, instruction_type == IT::Sltu ? a64::Condition::UnsignedLess
@@ -596,7 +597,7 @@ struct CodeGenerator {
         if (instruction.rd() != Register::Zero) {
           // cmp (immediate) takes SP as first operand so we need to special case zero register.
           if (instruction.rs1() == Register::Zero) {
-            const auto dest = register_cache.lock_register(instruction.rd());
+            const auto dest = register_cache.lock_register(WO{instruction.rd()});
 
             load_immediate_u(dest, instruction_type == InstructionType::Slti
                                      ? (int64_t(0) < int64_t(instruction.imm()))
@@ -605,7 +606,7 @@ struct CodeGenerator {
             register_cache.unlock_register_dirty(dest);
           } else {
             const auto [a, dest] =
-              register_cache.lock_registers(instruction.rs1(), instruction.rd());
+              register_cache.lock_registers(instruction.rs1(), WO{instruction.rd()});
             const auto imm = instruction.imm();
 
             if (!as.try_cmp(a, imm)) {
@@ -638,8 +639,8 @@ struct CodeGenerator {
       case IT::Srlw:
       case IT::Sraw: {
         if (instruction.rd() != Register::Zero) {
-          const auto [a, b, dest] =
-            register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+          const auto [a, b, dest] = register_cache.lock_registers(
+            instruction.rs1(), instruction.rs2(), WO{instruction.rd()});
 
           const auto a32 = cast_to_32bit(a);
           const auto b32 = cast_to_32bit(b);
@@ -683,8 +684,8 @@ struct CodeGenerator {
       case IT::Remw:
       case IT::Remuw: {
         if (instruction.rd() != Register::Zero) {
-          const auto [a, b, dest] =
-            register_cache.lock_registers(instruction.rs1(), instruction.rs2(), instruction.rd());
+          const auto [a, b, dest] = register_cache.lock_registers(
+            instruction.rs1(), instruction.rs2(), WO{instruction.rd()});
           const auto tmp = RegisterAllocation::a_reg;
 
           const auto a32 = cast_to_32bit(a);
