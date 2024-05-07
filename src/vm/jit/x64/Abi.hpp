@@ -10,8 +10,7 @@ struct Abi {
   X64R argument_reg{};
 
   static Abi windows();
-  static Abi linux();
-  static Abi macos();
+  static Abi systemv();
 };
 
 }  // namespace vm::jit::x64

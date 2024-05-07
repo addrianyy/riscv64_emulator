@@ -1,6 +1,5 @@
 #pragma once
 #include "CodeBuffer.hpp"
-#include "CodeDump.hpp"
 #include "Executor.hpp"
 
 namespace vm::jit {

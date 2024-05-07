@@ -23,9 +23,9 @@ std::unique_ptr<Executor> jit::create_arch_specific_executor(
 #ifdef PLATFORM_WINDOWS
   const auto abi = x64::Abi::windows();
 #elif defined(PLATFORM_LINUX)
-  const auto abi = x64::Abi::linux();
+  const auto abi = x64::Abi::systemv();
 #elif defined(PLATFORM_MAC)
-  const auto abi = x64::Abi::macos();
+  const auto abi = x64::Abi::systemv();
 #else
 #define JIT_UNUSPPORTED_PLATFORM
 #endif

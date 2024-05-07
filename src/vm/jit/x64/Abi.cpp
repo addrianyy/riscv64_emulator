@@ -19,7 +19,7 @@ Abi Abi::windows() {
   };
 }
 
-Abi Abi::linux() {
+Abi Abi::systemv() {
   return Abi{
     .callee_saved_regs =
       {
@@ -32,9 +32,4 @@ Abi Abi::linux() {
       },
     .argument_reg = X64R::Rdi,
   };
-}
-
-Abi Abi::macos() {
-  // macOS uses System-V ABI like Linux.
-  return linux();
 }
