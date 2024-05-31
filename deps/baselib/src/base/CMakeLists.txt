@@ -36,4 +36,8 @@ target_sources(baselib PRIVATE
     SumType.cpp
     Overload.cpp
     Overload.hpp
+    TerminalColors.cpp
+    TerminalColors.hpp
+    Stringify.cpp
+    Stringify.hpp
 )

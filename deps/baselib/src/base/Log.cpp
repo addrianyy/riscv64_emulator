@@ -36,5 +36,5 @@ void base::detail::log::log(const char* file,
       header = "??? ";
   }
 
-  base::println("{}{}" ESCAPE("\x1b[0m"), header, message);
+  base::println("{}" ESCAPE("\x1b[0m") "{}", header, message);
 }

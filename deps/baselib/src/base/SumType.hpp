@@ -86,7 +86,10 @@ consteval bool are_variants_unique() {
 
 template <typename... Variants>
 class SumType {
+ public:
   using VariantIDType = detail::sum_type::VariantIDType<Variants...>::T;
+
+ private:
   using Storage = std::aligned_storage_t<
     detail::sum_type::type_max<detail::sum_type::SizeCalculator, Variants...>(),
     detail::sum_type::type_max<detail::sum_type::AlignmentCalculator, Variants...>()>;
@@ -167,6 +170,8 @@ class SumType {
   }
 
   ~SumType() { destroy(); }
+
+  VariantIDType id() const { return variant_id; }
 
   template <typename Fn>
   constexpr auto visit(Fn&& fn) {
